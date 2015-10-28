@@ -7,17 +7,7 @@ package com.threerings.getdown.data;
 
 import java.awt.Color;
 import java.awt.Rectangle;
-import java.io.BufferedReader;
-import java.io.File;
-import java.io.FileInputStream;
-import java.io.FileNotFoundException;
-import java.io.FileOutputStream;
-import java.io.FileReader;
-import java.io.IOException;
-import java.io.InputStream;
-import java.io.InputStreamReader;
-import java.io.PrintStream;
-import java.io.RandomAccessFile;
+import java.io.*;
 import java.lang.reflect.Method;
 import java.net.MalformedURLException;
 import java.net.URL;
@@ -26,30 +16,13 @@ import java.net.URLConnection;
 import java.nio.channels.FileChannel;
 import java.nio.channels.FileLock;
 import java.nio.channels.OverlappingFileLockException;
-import java.security.AllPermission;
-import java.security.CodeSource;
-import java.security.GeneralSecurityException;
-import java.security.PermissionCollection;
-import java.security.Permissions;
-import java.security.Signature;
+import java.security.*;
 import java.security.cert.Certificate;
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.EnumMap;
-import java.util.HashMap;
-import java.util.HashSet;
-import java.util.Iterator;
-import java.util.List;
-import java.util.Locale;
-import java.util.Map.Entry;
-import java.util.Map;
-import java.util.Set;
+import java.util.*;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 import javax.swing.JApplet;
-
-import org.apache.commons.codec.binary.Base64;
 
 import com.samskivert.io.StreamUtil;
 import com.samskivert.text.MessageUtil;
@@ -57,14 +30,11 @@ import com.samskivert.util.ArrayUtil;
 import com.samskivert.util.RandomUtil;
 import com.samskivert.util.RunAnywhere;
 import com.samskivert.util.StringUtil;
+
+import org.apache.commons.codec.binary.Base64;
+
 import com.threerings.getdown.launcher.RotatingBackgrounds;
-import com.threerings.getdown.util.ConfigUtil;
-import com.threerings.getdown.util.ConnectionUtil;
-import com.threerings.getdown.util.FileUtil;
-import com.threerings.getdown.util.LaunchUtil;
-import com.threerings.getdown.util.MetaProgressObserver;
-import com.threerings.getdown.util.ProgressObserver;
-import com.threerings.getdown.util.VersionUtil;
+import com.threerings.getdown.util.*;
 
 import static com.threerings.getdown.Log.log;
 
@@ -172,6 +142,9 @@ public class Application
         /** Whether window decorations are hidden for the UI. */
         public boolean hideDecorations;
 
+        /** Whether progress text should be hidden or not. */
+        public boolean hideProgressText;
+
         /** The global percentages for each step. A step may have more than one, and
          * the lowest reasonable one is used if a step is revisited. */
         public Map<Step, List<Integer>> stepPercentages =
@@ -186,7 +159,8 @@ public class Application
                 ", pb=" + progressBar + ", srect=" + status + ", st=" + statusText +
                 ", shadow=" + textShadow + ", err=" + installError + ", nrect=" + patchNotes +
                 ", notes=" + patchNotesUrl + ", stepPercentages=" + stepPercentages +
-                ", parect=" + playAgain + ", paimage=" + playAgainImage + "]";
+                ", parect=" + playAgain + ", paimage=" + playAgainImage +
+                ", hideProgressText" + hideProgressText + "]";
         }
 
         /** Initializer */
@@ -626,10 +600,12 @@ public class Application
         _txtJvmArgs.clear();
 
         // parse our code resources
-        if (ConfigUtil.getMultiValue(cdata, "code") == null) {
+        if (ConfigUtil.getMultiValue(cdata, "code") == null &&
+            ConfigUtil.getMultiValue(cdata, "ucode") == null) {
             throw new IOException("m.missing_code");
         }
         parseResources(cdata, "code", false, _codes);
+        parseResources(cdata, "ucode", true, _codes);
 
         // parse our non-code resources
         parseResources(cdata, "resource", false, _resources);
@@ -639,6 +615,7 @@ public class Application
         for (String auxgroup : parseList(cdata, "auxgroups")) {
             ArrayList<Resource> codes = new ArrayList<Resource>();
             parseResources(cdata, auxgroup + ".code", false, codes);
+            parseResources(cdata, auxgroup + ".ucode", true, codes);
             ArrayList<Resource> rsrcs = new ArrayList<Resource>();
             parseResources(cdata, auxgroup + ".resource", false, rsrcs);
             parseResources(cdata, auxgroup + ".uresource", true, rsrcs);
@@ -689,6 +666,7 @@ public class Application
         _name = ui.name = (String)cdata.get("ui.name");
         ui.progress = parseRect(cdata, "ui.progress", ui.progress);
         ui.progressText = parseColor(cdata, "ui.progress_text", ui.progressText);
+        ui.hideProgressText =  Boolean.parseBoolean((String)cdata.get("ui.hide_progress_text"));
         ui.progressBar = parseColor(cdata, "ui.progress_bar", ui.progressBar);
         ui.status = parseRect(cdata, "ui.status", ui.status);
         ui.statusText = parseColor(cdata, "ui.status_text", ui.statusText);
@@ -925,7 +903,7 @@ public class Application
             if (cpbuf.length() > 0) {
                 cpbuf.append(File.pathSeparator);
             }
-            cpbuf.append(rsrc.getLocal().getAbsolutePath());
+            cpbuf.append(rsrc.getFinalTarget().getAbsolutePath());
         }
 
         ArrayList<String> args = new ArrayList<String>();
@@ -1013,7 +991,7 @@ public class Application
         for (String assignment : envvar) {
             envAssignments.add(processArg(assignment));
         }
-        for (Entry<String, String> environmentEntry : System.getenv().entrySet()) {
+        for (Map.Entry<String, String> environmentEntry : System.getenv().entrySet()) {
             envAssignments.add(environmentEntry.getKey() + "=" + environmentEntry.getValue());
         }
         String[] envp = envAssignments.toArray(new String[envAssignments.size()]);
@@ -1030,7 +1008,7 @@ public class Application
         ArrayList<URL> jars = new ArrayList<URL>();
         for (Resource rsrc : getActiveCodeResources()) {
             try {
-                jars.add(new URL("file", "", rsrc.getLocal().getAbsolutePath()));
+                jars.add(new URL("file", "", rsrc.getFinalTarget().getAbsolutePath()));
             } catch (Exception e) {
                 e.printStackTrace(System.err);
             }

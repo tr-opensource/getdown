@@ -105,21 +105,21 @@ public class StatusPanel extends JComponent
         // maybe update the progress label
         if (_progress != percent) {
             _progress = percent;
-            String msg = MessageFormat.format(get("m.complete"), percent);
-            _newplab = createLabel(msg, _ifc.progressText);
+            if (!_ifc.hideProgressText) {
+                String msg = MessageFormat.format(get("m.complete"), percent);
+                _newplab = createLabel(msg, _ifc.progressText);
+            }
             needsRepaint = true;
         }
 
         // maybe update the remaining label
         if (remaining > 1) {
-            // skip this estimate if it's been less than a second since
-            // our last one came in
+            // skip this estimate if it's been less than a second since our last one came in
             if (!_rthrottle.throttleOp()) {
                 _remain[_ridx++%_remain.length] = remaining;
             }
 
-            // smooth the remaining time by taking the trailing average of
-            // the last four values
+            // smooth the remaining time by taking the trailing average of the last four values
             remaining = 0;
             int values = Math.min(_ridx, _remain.length);
             for (int ii = 0; ii < values; ii++) {
@@ -127,13 +127,13 @@ public class StatusPanel extends JComponent
             }
             remaining /= values;
 
-            // now compute our display value
-            int minutes = (int)(remaining / 60);
-            int seconds = (int)(remaining % 60);
-
-            String remstr = minutes + ":" + ((seconds < 10) ? "0" : "") + seconds;
-            String msg = MessageFormat.format(get("m.remain"), remstr);
-            _newrlab = createLabel(msg, _ifc.statusText);
+            if (!_ifc.hideProgressText) {
+                // now compute our display value
+                int minutes = (int)(remaining / 60), seconds = (int)(remaining % 60);
+                String remstr = minutes + ":" + ((seconds < 10) ? "0" : "") + seconds;
+                String msg = MessageFormat.format(get("m.remain"), remstr);
+                _newrlab = createLabel(msg, _ifc.statusText);
+            }
             needsRepaint = true;
 
         } else if (_rlabel != null || _newrlab != null) {
@@ -238,8 +238,7 @@ public class StatusPanel extends JComponent
         if (_plabel != null) {
             int xmarg = (_ifc.progress.width - _plabel.getSize().width)/2;
             int ymarg = (_ifc.progress.height - _plabel.getSize().height)/2;
-            _plabel.render(gfx, _ifc.progress.x + xmarg,
-                           _ifc.progress.y + ymarg);
+            _plabel.render(gfx, _ifc.progress.x + xmarg, _ifc.progress.y + ymarg);
         }
 
         if (_label != null) {

@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<project xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/maven-v4_0_0.xsd" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns="http://maven.apache.org/POM/4.0.0">
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/maven-v4_0_0.xsd">
   <modelVersion>4.0.0</modelVersion>
   <parent>
     <groupId>org.sonatype.oss</groupId>
@@ -10,7 +10,7 @@
   <groupId>com.threerings</groupId>
   <artifactId>getdown</artifactId>
   <packaging>jar</packaging>
-  <version>1.5-SNAPSHOT</version>
+  <version>1.6-SNAPSHOT</version>
 
   <name>getdown</name>
   <description>An application installer and updater.</description>
@@ -18,6 +18,10 @@
   <issueManagement>
     <url>https://github.com/threerings/getdown/issues</url>
   </issueManagement>
+
+  <prerequisites>
+    <maven>3.3.0</maven>
+  </prerequisites>
 
   <licenses>
     <license>
@@ -98,11 +102,12 @@
         <includes><include>LICENSE</include></includes>
       </resource>
     </resources>
+
     <plugins>
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-compiler-plugin</artifactId>
-        <version>3.1</version>
+        <version>3.3</version>
         <configuration>
           <source>1.5</source>
           <target>1.5</target>
@@ -116,23 +121,27 @@
           </compilerArgs>
         </configuration>
       </plugin>
+
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-resources-plugin</artifactId>
-        <version>2.4.3</version>
+        <version>2.7</version>
         <configuration>
           <encoding>UTF-8</encoding>
         </configuration>
       </plugin>
+
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-javadoc-plugin</artifactId>
-        <version>2.7</version>
+        <version>2.10.3</version>
         <configuration>
           <quiet>true</quiet>
           <show>public</show>
+          <additionalparam>-Xdoclint:all -Xdoclint:-missing</additionalparam>
         </configuration>
       </plugin>
+
       <plugin>
         <groupId>com.github.wvengen</groupId>
         <artifactId>proguard-maven-plugin</artifactId>
@@ -186,10 +195,11 @@
           <addMavenDescriptor>false</addMavenDescriptor>
         </configuration>
       </plugin>
+
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-jar-plugin</artifactId>
-        <version>2.3.1</version>
+        <version>2.6</version>
         <configuration>
           <archive>
             <manifest>
@@ -203,6 +213,19 @@
               <Caller-Allowable-Codebase>*</Caller-Allowable-Codebase>
             </manifestEntries>
           </archive>
+        </configuration>
+      </plugin>
+
+      <plugin>
+        <groupId>org.sonatype.plugins</groupId>
+        <artifactId>nexus-staging-maven-plugin</artifactId>
+        <version>1.6.6</version>
+        <extensions>true</extensions>
+        <inherited>false</inherited>
+        <configuration>
+          <serverId>ossrh-releases</serverId>
+          <nexusUrl>https://oss.sonatype.org/</nexusUrl>
+          <stagingProfileId>aa555c46fc37d0</stagingProfileId>
         </configuration>
       </plugin>
     </plugins>
@@ -260,7 +283,7 @@
           <plugin>
             <groupId>org.apache.maven.plugins</groupId>
             <artifactId>maven-gpg-plugin</artifactId>
-            <version>1.1</version>
+            <version>1.6</version>
             <executions>
               <execution>
                 <id>sign-artifacts</id>
@@ -278,16 +301,7 @@
       </build>
     </profile>
 
-    <!-- finagling to deal with rt.jar not existing on Macs, thanks Apple! -->
-    <profile>
-      <id>mac</id>
-      <activation>
-        <file><exists>${java.home}/../Classes/classes.jar</exists></file>
-      </activation>
-      <properties>
-        <rt.jar.path>${java.home}/../Classes/classes.jar</rt.jar.path>
-      </properties>
-    </profile>
+    <!-- finagling to find rt.jar -->
     <profile>
       <id>non-mac-jre</id>
       <activation>

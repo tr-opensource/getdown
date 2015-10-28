@@ -5,24 +5,20 @@
 
 package com.threerings.getdown.data;
 
-import java.io.File;
-import java.io.FileInputStream;
-import java.io.IOException;
-import java.io.InputStream;
-
+import java.io.*;
 import java.net.URL;
 import java.security.MessageDigest;
-
-import java.util.Comparator;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.List;
 import java.util.jar.JarEntry;
 import java.util.jar.JarFile;
+import java.util.jar.JarInputStream;
 
 import com.samskivert.io.StreamUtil;
-import com.samskivert.util.FileUtil;
 import com.samskivert.util.StringUtil;
 
+import com.threerings.getdown.util.FileUtil;
 import com.threerings.getdown.util.ProgressObserver;
 
 import static com.threerings.getdown.Log.log;
@@ -40,8 +36,19 @@ public class Resource
         _path = path;
         _remote = remote;
         _local = local;
-        _marker = new File(_local.getPath() + "v");
+        String lpath = _local.getPath();
+        _marker = new File(lpath + "v");
+
         _unpack = unpack;
+        _isJar = isJar(lpath);
+        _isPacked200Jar = isPacked200Jar(lpath);
+        if (_unpack && _isJar) {
+            _unpacked = _local.getParentFile();
+        } else if(_unpack && _isPacked200Jar) {
+            String dotJar = ".jar", lname = _local.getName();
+            String uname = lname.substring(0, lname.lastIndexOf(dotJar) + dotJar.length());
+            _unpacked = new File(_local.getParent(), uname);
+        }
     }
 
     /**
@@ -58,6 +65,22 @@ public class Resource
     public File getLocal ()
     {
         return _local;
+    }
+
+    /**
+     *  Returns the location of the unpacked resource.
+     */
+    public File getUnpacked ()
+    {
+        return _unpacked;
+    }
+
+    /**
+     *  Returns the final target of this resource, whether it has been unpacked or not.
+     */
+    public File getFinalTarget ()
+    {
+        return shouldUnpack() ? getUnpacked() : getLocal();
     }
 
     /**
@@ -132,12 +155,16 @@ public class Resource
     public boolean unpack ()
     {
         // sanity check
-        if (!_local.getPath().endsWith(".jar")) {
+        if (!_isJar && !_isPacked200Jar) {
             log.warning("Requested to unpack non-jar file '" + _local + "'.");
             return false;
         }
         try {
-            return FileUtil.unpackJar(new JarFile(_local), _local.getParentFile());
+            if (_isJar) {
+                return FileUtil.unpackJar(new JarFile(_local), _unpacked);
+            } else{
+                return FileUtil.unpackPacked200Jar(_local, _unpacked);
+            }
         } catch (IOException ioe) {
             log.warning("Failed to create JarFile from '" + _local + "': " + ioe);
             return false;
@@ -145,8 +172,8 @@ public class Resource
     }
 
     /**
-     * Wipes this resource file along with any "validated" marker file
-     * that may be associated with it.
+     * Wipes this resource file along with any "validated" marker file that may be associated with
+     * it.
      */
     public void erase ()
     {
@@ -158,11 +185,7 @@ public class Resource
         }
     }
 
-    /**
-     * If our path is equal, we are equal.
-     */
-    @Override
-    public boolean equals (Object other)
+    @Override public boolean equals (Object other)
     {
         if (other instanceof Resource) {
             return _path.equals(((Resource)other)._path);
@@ -171,20 +194,12 @@ public class Resource
         }
     }
 
-    /**
-     * We hash on our path.
-     */
-    @Override
-    public int hashCode ()
+    @Override public int hashCode ()
     {
         return _path.hashCode();
     }
 
-    /**
-     * Returns a string representation of this instance.
-     */
-    @Override
-    public String toString ()
+    @Override public String toString ()
     {
         return _path;
     }
@@ -192,20 +207,31 @@ public class Resource
     /**
      * Computes the MD5 hash of the supplied file.
      */
-    public static String computeDigest (
-        File target, MessageDigest md, ProgressObserver obs)
+    public static String computeDigest (File target, MessageDigest md, ProgressObserver obs)
         throws IOException
     {
         md.reset();
         byte[] buffer = new byte[DIGEST_BUFFER_SIZE];
         int read;
 
-        // if this is a jar file, we need to compute the digest in a
-        // timestamp and file order agnostic manner to properly correlate
-        // jardiff patched jars with their unpatched originals
-        if (target.getPath().endsWith(".jar")) {
-            JarFile jar = new JarFile(target);
+        boolean isJar = isJar(target.getPath());
+        boolean isPacked200Jar = isPacked200Jar(target.getPath());
+
+        // if this is a jar, we need to compute the digest in a "timestamp and file order" agnostic
+        // manner to properly correlate jardiff patched jars with their unpatched originals
+        if (isJar || isPacked200Jar){
+            File tmpJarFile = null;
+            JarFile jar = null;
             try {
+                // if this is a compressed jar file, uncompress it to compute the jar file digest
+                if (isPacked200Jar){
+                    tmpJarFile = new File(target.getPath() + ".tmp");
+                    FileUtil.unpackPacked200Jar(target, tmpJarFile);
+                    jar = new JarFile(tmpJarFile);
+                } else{
+                    jar = new JarFile(target);
+                }
+
                 List<JarEntry> entries = Collections.list(jar.entries());
                 Collections.sort(entries, ENTRY_COMP);
 
@@ -231,10 +257,15 @@ public class Resource
                 }
 
             } finally {
-                try {
-                    jar.close();
-                } catch (IOException ioe) {
-                    log.warning("Error closing jar [path=" + target + ", error=" + ioe + "].");
+                if (jar != null) {
+                    try {
+                        jar.close();
+                    } catch (IOException ioe) {
+                        log.warning("Error closing jar", "path", target, "jar", jar, "error", ioe);
+                    }
+                }
+                if (tmpJarFile != null) {
+                    tmpJarFile.delete();
                 }
             }
 
@@ -256,23 +287,31 @@ public class Resource
     }
 
     /** Helper function to simplify the process of reporting progress. */
-    protected static void updateProgress (
-        ProgressObserver obs, long pos, long total)
+    protected static void updateProgress (ProgressObserver obs, long pos, long total)
     {
         if (obs != null) {
             obs.progress((int)(100 * pos / total));
         }
     }
 
+    protected static boolean isJar (String path)
+    {
+        return path.endsWith(".jar");
+    }
+
+    protected static boolean isPacked200Jar (String path)
+    {
+        return path.endsWith(".jar.pack") || path.endsWith(".jar.pack.gz");
+    }
+
     protected String _path;
     protected URL _remote;
-    protected File _local, _marker;
-    protected boolean _unpack;
+    protected File _local, _marker, _unpacked;
+    protected boolean _unpack, _isJar, _isPacked200Jar;
 
     /** Used to sort the entries in a jar file. */
-    protected static final Comparator<JarEntry> ENTRY_COMP =
-            new Comparator<JarEntry>() {
-        public int compare (JarEntry e1, JarEntry e2) {
+    protected static final Comparator<JarEntry> ENTRY_COMP = new Comparator<JarEntry>() {
+        @Override public int compare (JarEntry e1, JarEntry e2) {
             return e1.getName().compareTo(e2.getName());
         }
     };

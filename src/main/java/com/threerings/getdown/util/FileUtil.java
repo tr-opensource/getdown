@@ -5,15 +5,12 @@
 
 package com.threerings.getdown.util;
 
-import java.io.BufferedReader;
-import java.io.File;
-import java.io.FileInputStream;
-import java.io.FileOutputStream;
-import java.io.IOException;
-import java.io.Reader;
-
+import java.io.*;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.jar.JarOutputStream;
+import java.util.jar.Pack200;
+import java.util.zip.GZIPInputStream;
 
 import com.samskivert.io.StreamUtil;
 
@@ -22,7 +19,7 @@ import static com.threerings.getdown.Log.log;
 /**
  * File related utilities.
  */
-public class FileUtil
+public class FileUtil extends com.samskivert.util.FileUtil
 {
     /**
      * Gets the specified source file to the specified destination file by hook or crook. Windows
@@ -95,5 +92,36 @@ public class FileUtil
             StreamUtil.close(in);
         }
         return lines;
+    }
+
+    /**
+     * Unpacks a pack200 packed jar file from {@code packedJar} into {@code target}. If {@code
+     * packedJar} has a {@code .gz} extension, it will be gunzipped first.
+     */
+    public static boolean unpackPacked200Jar (File packedJar, File target)
+    {
+        InputStream packedJarIn = null;
+        FileOutputStream extractedJarFileOut = null;
+        JarOutputStream jarOutputStream = null;
+        try {
+            extractedJarFileOut = new FileOutputStream(target);
+            jarOutputStream = new JarOutputStream(extractedJarFileOut);
+            packedJarIn = new FileInputStream(packedJar);
+            if (packedJar.getName().endsWith(".gz")) {
+                packedJarIn = new GZIPInputStream(packedJarIn);
+            }
+            Pack200.Unpacker unpacker = Pack200.newUnpacker();
+            unpacker.unpack(packedJarIn, jarOutputStream);
+            return true;
+
+        } catch (IOException e) {
+            log.warning("Failed to unpack packed 200 jar file", "jar", packedJar, "error", e);
+            return false;
+
+        } finally {
+            StreamUtil.close(jarOutputStream);
+            StreamUtil.close(extractedJarFileOut);
+            StreamUtil.close(packedJarIn);
+        }
     }
 }
