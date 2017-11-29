@@ -1,11 +1,12 @@
 //
 // Getdown - application installer, patcher and launcher
-// Copyright (C) 2004-2014 Three Rings Design, Inc.
-// https://raw.github.com/threerings/getdown/master/LICENSE
+// Copyright (C) 2004-2016 Getdown authors
+// https://github.com/threerings/getdown/blob/master/LICENSE
 
 package com.threerings.getdown.data;
 
 import com.threerings.getdown.util.VersionUtil;
+import com.threerings.getdown.launcher.Getdown;
 
 /**
  * This class encapsulates all system properties that are read and processed by Getdown. Don't
@@ -26,7 +27,7 @@ public class SysProps
     }
 
     /** Configures the appbase (in lieu of providing a skeleton getdown.txt, and as a last resort
-      * fallback). Usage: {@code -Dappbase=someurl}. */
+      * fallback). Usage: {@code -Dappbase=URL}. */
     public static String appBase () {
         return System.getProperty("appbase");
     }
@@ -42,11 +43,23 @@ public class SysProps
         return System.getProperty("appbase_domain");
     }
 
+    /** Overrides enter {@code appbase}. Usage: {@code -Dappbase_override=URL}. */
+    public static String appbaseOverride () {
+        return System.getProperty("appbase_override");
+    }
+
     /** If true, Getdown installs the app without ever bringing up a UI, except in the event of an
       * error. NOTE: it does not launch the app. See {@link #launchInSilent}.
       * Usage: {@code -Dsilent}. */
     public static boolean silent () {
         return System.getProperty("silent") != null;
+    }
+
+    /** If true, Getdown does not automatically install updates after downloading them. It waits
+      * for the application to call {@link Getdown#install}.
+      * Usage: {@code -Dno_install}. */
+    public static boolean noInstall () {
+     return System.getProperty("no_install") != null;
     }
 
     /** If true, Getdown installs the app without ever bringing up a UI and then launches it.
@@ -80,6 +93,14 @@ public class SysProps
       * communicating is not available. Usage: {@code -Dconnect_timeout=N}. */
     public static int connectTimeout () {
         return Integer.getInteger("connect_timeout", 0);
+    }
+
+    /** Specifies the read timeout (in seconds) to use when downloading all files from the server.
+      * The default is 30 seconds, meaning that if a download stalls for more than 30 seconds, the
+      * update process wil fail. Setting the timeout to zero (or a negative value) will disable it.
+      * Usage: {@code -Dread_timeout=N}. */
+    public static int readTimeout () {
+        return Integer.getInteger("read_timeout", 30);
     }
 
     /** Parses a Java version system property using the supplied regular expression. The numbers

@@ -1,7 +1,7 @@
 //
 // Getdown - application installer, patcher and launcher
-// Copyright (C) 2004-2014 Three Rings Design, Inc.
-// https://raw.github.com/threerings/getdown/master/LICENSE
+// Copyright (C) 2004-2016 Getdown authors
+// https://github.com/threerings/getdown/blob/master/LICENSE
 
 package com.threerings.getdown.util;
 
@@ -10,7 +10,6 @@ import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.PrintStream;
-import com.samskivert.io.StreamUtil;
 import com.samskivert.util.RunAnywhere;
 import com.samskivert.util.StringUtil;
 
@@ -93,7 +92,7 @@ public class LaunchUtil
     public static String getJVMPath (File appdir, boolean windebug)
     {
         // first look in our application directory for an installed VM
-        String vmpath = checkJVMPath(new File(appdir, LOCAL_JAVA_DIR).getPath(), windebug);
+        String vmpath = checkJVMPath(new File(appdir, LOCAL_JAVA_DIR).getAbsolutePath(), windebug);
 
         // then fall back to the VM in which we're already running
         if (vmpath == null) {
@@ -155,7 +154,7 @@ public class LaunchUtil
                 try {
                     // copy the moved file back to getdown-dop-new.jar so that we don't end up
                     // downloading another copy next time
-                    StreamUtil.copy(new FileInputStream(curgd), new FileOutputStream(newgd));
+                    FileUtil.copy(curgd, newgd);
                 } catch (IOException e) {
                     log.warning("Error copying updated Getdown back: " + e);
                 }
@@ -172,7 +171,7 @@ public class LaunchUtil
         // that didn't work, let's try copying it
         log.info("Attempting to upgrade by copying over " + curgd + "...");
         try {
-            StreamUtil.copy(new FileInputStream(newgd), new FileOutputStream(curgd));
+            FileUtil.copy(newgd, curgd);
         } catch (IOException ioe) {
             log.warning("Mayday! Brute force copy method also failed.", ioe);
         }

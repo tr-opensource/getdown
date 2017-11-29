@@ -1,7 +1,7 @@
 //
 // Getdown - application installer, patcher and launcher
-// Copyright (C) 2004-2014 Three Rings Design, Inc.
-// https://raw.github.com/threerings/getdown/master/LICENSE
+// Copyright (C) 2004-2016 Getdown authors
+// https://github.com/threerings/getdown/blob/master/LICENSE
 
 package com.threerings.getdown.net;
 
@@ -10,11 +10,12 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.net.HttpURLConnection;
 import java.net.URLConnection;
-import java.util.List;
+import java.util.Collection;
 
 import com.samskivert.io.StreamUtil;
 
 import com.threerings.getdown.data.Resource;
+import com.threerings.getdown.data.SysProps;
 import com.threerings.getdown.util.ConnectionUtil;
 
 import static com.threerings.getdown.Log.log;
@@ -24,7 +25,7 @@ import static com.threerings.getdown.Log.log;
  */
 public class HTTPDownloader extends Downloader
 {
-    public HTTPDownloader (List<Resource> resources, Observer obs)
+    public HTTPDownloader (Collection<Resource> resources, Observer obs)
     {
         super(resources, obs);
     }
@@ -33,7 +34,7 @@ public class HTTPDownloader extends Downloader
     protected long checkSize (Resource rsrc)
         throws IOException
     {
-        URLConnection conn = ConnectionUtil.open(rsrc.getRemote());
+        URLConnection conn = ConnectionUtil.open(rsrc.getRemote(), 0, 0);
         try {
             // if we're accessing our data via HTTP, we only need a HEAD request
             if (conn instanceof HttpURLConnection) {
@@ -59,7 +60,7 @@ public class HTTPDownloader extends Downloader
         throws IOException
     {
         // download the resource from the specified URL
-        URLConnection conn = ConnectionUtil.open(rsrc.getRemote());
+        URLConnection conn = ConnectionUtil.open(rsrc.getRemote(), 0, 0);
         conn.connect();
 
         // make sure we got a satisfactory response code
@@ -78,7 +79,7 @@ public class HTTPDownloader extends Downloader
         long currentSize = 0L;
         try {
             in = conn.getInputStream();
-            out = new FileOutputStream(rsrc.getLocal());
+            out = new FileOutputStream(rsrc.getLocalNew());
             int read;
 
             // TODO: look to see if we have a download info file

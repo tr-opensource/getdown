@@ -1,7 +1,7 @@
 //
 // Getdown - application installer, patcher and launcher
-// Copyright (C) 2004-2014 Three Rings Design, Inc.
-// https://raw.github.com/threerings/getdown/master/LICENSE
+// Copyright (C) 2004-2016 Getdown authors
+// https://github.com/threerings/getdown/blob/master/LICENSE
 
 package com.threerings.getdown.tools;
 
@@ -60,13 +60,13 @@ public class Differ
 
         Application oapp = new Application(ovdir, null);
         oapp.init(false);
-        ArrayList<Resource> orsrcs = new ArrayList<Resource>();
+        ArrayList<Resource> orsrcs = new ArrayList<>();
         orsrcs.addAll(oapp.getCodeResources());
         orsrcs.addAll(oapp.getResources());
 
         Application napp = new Application(nvdir, null);
         napp.init(false);
-        ArrayList<Resource> nrsrcs = new ArrayList<Resource>();
+        ArrayList<Resource> nrsrcs = new ArrayList<>();
         nrsrcs.addAll(napp.getCodeResources());
         nrsrcs.addAll(napp.getResources());
 
@@ -76,13 +76,13 @@ public class Differ
 
         // next create patches for any auxiliary resource groups
         for (Application.AuxGroup ag : napp.getAuxGroups()) {
-            orsrcs = new ArrayList<Resource>();
+            orsrcs = new ArrayList<>();
             Application.AuxGroup oag = oapp.getAuxGroup(ag.name);
             if (oag != null) {
                 orsrcs.addAll(oag.codes);
                 orsrcs.addAll(oag.rsrcs);
             }
-            nrsrcs = new ArrayList<Resource>();
+            nrsrcs = new ArrayList<>();
             nrsrcs.addAll(ag.codes);
             nrsrcs.addAll(ag.rsrcs);
             patch = new File(nvdir, "patch-" + ag.name + overs + ".dat");
@@ -94,7 +94,8 @@ public class Differ
                                 ArrayList<Resource> nrsrcs, boolean verbose)
         throws IOException
     {
-        MessageDigest md = Digest.getMessageDigest();
+        int version = Digest.VERSION;
+        MessageDigest md = Digest.getMessageDigest(version);
         JarOutputStream jout = null;
         try {
             jout = new JarOutputStream(
@@ -107,8 +108,8 @@ public class Differ
                 Resource orsrc = (oidx == -1) ? null : orsrcs.remove(oidx);
                 if (orsrc != null) {
                     // first see if they are the same
-                    String odig = orsrc.computeDigest(md, null);
-                    String ndig = rsrc.computeDigest(md, null);
+                    String odig = orsrc.computeDigest(version, md, null);
+                    String ndig = rsrc.computeDigest(version, md, null);
                     if (odig.equals(ndig)) {
                         if (verbose) {
                             System.out.println("Unchanged: " + rsrc.getPath());

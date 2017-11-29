@@ -1,15 +1,18 @@
 //
 // Getdown - application installer, patcher and launcher
-// Copyright (C) 2004-2014 Three Rings Design, Inc.
-// https://raw.github.com/threerings/getdown/master/LICENSE
+// Copyright (C) 2004-2016 Getdown authors
+// https://github.com/threerings/getdown/blob/master/LICENSE
 
 package com.threerings.getdown.util;
 
+import java.io.File;
 import java.io.IOException;
 import java.io.StringReader;
 import java.util.List;
 
 import org.junit.*;
+import org.junit.rules.TemporaryFolder;
+
 import static org.junit.Assert.*;
 
 /**
@@ -27,4 +30,31 @@ public class FileUtilTest
             assertEquals(linesBySplit[ii], lines.get(ii));
         }
     }
+
+    @Test public void shouldCopyFile () throws IOException
+    {
+        File source = _folder.newFile("source.txt");
+        File target = new File(_folder.getRoot(), "target.txt");
+        assertFalse(target.exists());
+        FileUtil.copy(source, target);
+        assertTrue(target.exists());
+    }
+
+    @Test public void shouldRecursivelyWalkOverFilesAndFolders () throws IOException
+    {
+        _folder.newFile("a.txt");
+        new File(_folder.newFolder("b"), "b.txt").createNewFile();
+
+        class CountingVisitor implements FileUtil.Visitor {
+            int fileCount = 0;
+            @Override public void visit(File file) {
+                fileCount++;
+            }
+        }
+        CountingVisitor visitor = new CountingVisitor();
+        FileUtil.walkTree(_folder.getRoot(), visitor);
+        assertEquals(3, visitor.fileCount);
+    }
+
+    @Rule public TemporaryFolder _folder = new TemporaryFolder();
 }

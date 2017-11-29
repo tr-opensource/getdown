@@ -1,7 +1,7 @@
 //
 // Getdown - application installer, patcher and launcher
-// Copyright (C) 2004-2014 Three Rings Design, Inc.
-// https://raw.github.com/threerings/getdown/master/LICENSE
+// Copyright (C) 2004-2016 Getdown authors
+// https://github.com/threerings/getdown/blob/master/LICENSE
 
 package com.threerings.getdown.tools;
 
@@ -106,10 +106,8 @@ public class Patcher
 
         // make sure the file's parent directory exists
         File pdir = target.getParentFile();
-        if (!pdir.exists()) {
-            if (!pdir.mkdirs()) {
-                log.warning("Failed to create parent for '" + target + "'.");
-            }
+        if (!pdir.exists() && !pdir.mkdirs()) {
+            log.warning("Failed to create parent for '" + target + "'.");
         }
 
         InputStream in = null;

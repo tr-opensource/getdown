@@ -1,7 +1,7 @@
 //
 // Getdown - application installer, patcher and launcher
-// Copyright (C) 2004-2014 Three Rings Design, Inc.
-// https://raw.github.com/threerings/getdown/master/LICENSE
+// Copyright (C) 2004-2016 Getdown authors
+// https://github.com/threerings/getdown/blob/master/LICENSE
 
 package com.threerings.getdown.data;
 
@@ -13,7 +13,6 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.jar.JarEntry;
 import java.util.jar.JarFile;
-import java.util.jar.JarInputStream;
 
 import com.samskivert.io.StreamUtil;
 import com.samskivert.util.StringUtil;
@@ -26,188 +25,14 @@ import static com.threerings.getdown.Log.log;
 /**
  * Models a single file resource used by an {@link Application}.
  */
-public class Resource
+public class Resource implements Comparable<Resource>
 {
     /**
-     * Creates a resource with the supplied remote URL and local path.
-     */
-    public Resource (String path, URL remote, File local, boolean unpack)
-    {
-        _path = path;
-        _remote = remote;
-        _local = local;
-        String lpath = _local.getPath();
-        _marker = new File(lpath + "v");
-
-        _unpack = unpack;
-        _isJar = isJar(lpath);
-        _isPacked200Jar = isPacked200Jar(lpath);
-        if (_unpack && _isJar) {
-            _unpacked = _local.getParentFile();
-        } else if(_unpack && _isPacked200Jar) {
-            String dotJar = ".jar", lname = _local.getName();
-            String uname = lname.substring(0, lname.lastIndexOf(dotJar) + dotJar.length());
-            _unpacked = new File(_local.getParent(), uname);
-        }
-    }
-
-    /**
-     * Returns the path associated with this resource.
-     */
-    public String getPath ()
-    {
-        return _path;
-    }
-
-    /**
-     * Returns the local location of this resource.
-     */
-    public File getLocal ()
-    {
-        return _local;
-    }
-
-    /**
-     *  Returns the location of the unpacked resource.
-     */
-    public File getUnpacked ()
-    {
-        return _unpacked;
-    }
-
-    /**
-     *  Returns the final target of this resource, whether it has been unpacked or not.
-     */
-    public File getFinalTarget ()
-    {
-        return shouldUnpack() ? getUnpacked() : getLocal();
-    }
-
-    /**
-     * Returns the remote location of this resource.
-     */
-    public URL getRemote ()
-    {
-        return _remote;
-    }
-
-    /**
-     * Returns true if this resource should be unpacked as a part of the
-     * validation process.
-     */
-    public boolean shouldUnpack ()
-    {
-        return _unpack;
-    }
-
-    /**
-     * Computes the MD5 hash of this resource's underlying file.
-     * <em>Note:</em> This is both CPU and I/O intensive.
-     */
-    public String computeDigest (MessageDigest md, ProgressObserver obs)
-        throws IOException
-    {
-        return computeDigest(_local, md, obs);
-    }
-
-    /**
-     * Returns true if this resource has an associated "validated" marker
-     * file.
-     */
-    public boolean isMarkedValid ()
-    {
-        if (!_local.exists()) {
-            clearMarker();
-            return false;
-        }
-        return _marker.exists();
-    }
-
-    /**
-     * Creates a "validated" marker file for this resource to indicate
-     * that its MD5 hash has been computed and compared with the value in
-     * the digest file.
-     *
-     * @throws IOException if we fail to create the marker file.
-     */
-    public void markAsValid ()
-        throws IOException
-    {
-        _marker.createNewFile();
-    }
-
-    /**
-     * Removes any "validated" marker file associated with this resource.
-     */
-    public void clearMarker ()
-    {
-        if (_marker.exists()) {
-            if (!_marker.delete()) {
-                log.warning("Failed to erase marker file '" + _marker + "'.");
-            }
-        }
-    }
-
-    /**
-     * Unpacks this resource file into the directory that contains it. Returns
-     * false if an error occurs while unpacking it.
-     */
-    public boolean unpack ()
-    {
-        // sanity check
-        if (!_isJar && !_isPacked200Jar) {
-            log.warning("Requested to unpack non-jar file '" + _local + "'.");
-            return false;
-        }
-        try {
-            if (_isJar) {
-                return FileUtil.unpackJar(new JarFile(_local), _unpacked);
-            } else{
-                return FileUtil.unpackPacked200Jar(_local, _unpacked);
-            }
-        } catch (IOException ioe) {
-            log.warning("Failed to create JarFile from '" + _local + "': " + ioe);
-            return false;
-        }
-    }
-
-    /**
-     * Wipes this resource file along with any "validated" marker file that may be associated with
-     * it.
-     */
-    public void erase ()
-    {
-        clearMarker();
-        if (_local.exists()) {
-            if (!_local.delete()) {
-                log.warning("Failed to erase resource '" + _local + "'.");
-            }
-        }
-    }
-
-    @Override public boolean equals (Object other)
-    {
-        if (other instanceof Resource) {
-            return _path.equals(((Resource)other)._path);
-        } else {
-            return false;
-        }
-    }
-
-    @Override public int hashCode ()
-    {
-        return _path.hashCode();
-    }
-
-    @Override public String toString ()
-    {
-        return _path;
-    }
-
-    /**
      * Computes the MD5 hash of the supplied file.
+     * @param version the version of the digest protocol to use.
      */
-    public static String computeDigest (File target, MessageDigest md, ProgressObserver obs)
+    public static String computeDigest (int version, File target, MessageDigest md,
+                                        ProgressObserver obs)
         throws IOException
     {
         md.reset();
@@ -237,13 +62,14 @@ public class Resource
 
                 int eidx = 0;
                 for (JarEntry entry : entries) {
-                    // skip metadata; we just want the goods
-                    if (entry.getName().startsWith("META-INF")) {
-                        updateProgress(obs, eidx, entries.size());
-                        continue;
+                    // old versions of the digest code skipped metadata
+                    if (version < 2) {
+                        if (entry.getName().startsWith("META-INF")) {
+                            updateProgress(obs, eidx, entries.size());
+                            continue;
+                        }
                     }
 
-                    // add this file's data to the MD5 hash
                     InputStream in = null;
                     try {
                         in = jar.getInputStream(entry);
@@ -286,6 +112,213 @@ public class Resource
         return StringUtil.hexlate(md.digest());
     }
 
+    /**
+     * Creates a resource with the supplied remote URL and local path.
+     */
+    public Resource (String path, URL remote, File local, boolean unpack)
+    {
+        _path = path;
+        _remote = remote;
+        _local = local;
+        _localNew = new File(local.toString() + "_new");
+        String lpath = _local.getPath();
+        _marker = new File(lpath + "v");
+
+        _unpack = unpack;
+        _isJar = isJar(lpath);
+        _isPacked200Jar = isPacked200Jar(lpath);
+        if (_unpack && _isJar) {
+            _unpacked = _local.getParentFile();
+        } else if(_unpack && _isPacked200Jar) {
+            String dotJar = ".jar", lname = _local.getName();
+            String uname = lname.substring(0, lname.lastIndexOf(dotJar) + dotJar.length());
+            _unpacked = new File(_local.getParent(), uname);
+        }
+    }
+
+    /**
+     * Returns the path associated with this resource.
+     */
+    public String getPath ()
+    {
+        return _path;
+    }
+
+    /**
+     * Returns the local location of this resource.
+     */
+    public File getLocal ()
+    {
+        return _local;
+    }
+
+    /**
+     * Returns the location of the to-be-installed new version of this resource.
+     */
+    public File getLocalNew ()
+    {
+        return _localNew;
+    }
+
+    /**
+     *  Returns the location of the unpacked resource.
+     */
+    public File getUnpacked ()
+    {
+        return _unpacked;
+    }
+
+    /**
+     *  Returns the final target of this resource, whether it has been unpacked or not.
+     */
+    public File getFinalTarget ()
+    {
+        return shouldUnpack() ? getUnpacked() : getLocal();
+    }
+
+    /**
+     * Returns the remote location of this resource.
+     */
+    public URL getRemote ()
+    {
+        return _remote;
+    }
+
+    /**
+     * Returns true if this resource should be unpacked as a part of the validation process.
+     */
+    public boolean shouldUnpack ()
+    {
+        return _unpack && !SysProps.noUnpack();
+    }
+
+    /**
+     * Computes the MD5 hash of this resource's underlying file.
+     * <em>Note:</em> This is both CPU and I/O intensive.
+     * @param version the version of the digest protocol to use.
+     */
+    public String computeDigest (int version, MessageDigest md, ProgressObserver obs)
+        throws IOException
+    {
+        File file;
+        if (_local.toString().toLowerCase().endsWith(Application.CONFIG_FILE)) {
+            file = _local;
+        } else {
+            file = _localNew.exists() ? _localNew : _local;
+        }
+        return computeDigest(version, file, md, obs);
+    }
+
+    /**
+     * Returns true if this resource has an associated "validated" marker
+     * file.
+     */
+    public boolean isMarkedValid ()
+    {
+        if (!_local.exists()) {
+            clearMarker();
+            return false;
+        }
+        return _marker.exists();
+    }
+
+    /**
+     * Creates a "validated" marker file for this resource to indicate
+     * that its MD5 hash has been computed and compared with the value in
+     * the digest file.
+     *
+     * @throws IOException if we fail to create the marker file.
+     */
+    public void markAsValid ()
+        throws IOException
+    {
+        _marker.createNewFile();
+    }
+
+    /**
+     * Removes any "validated" marker file associated with this resource.
+     */
+    public void clearMarker ()
+    {
+        if (_marker.exists() && !_marker.delete()) {
+            log.warning("Failed to erase marker file '" + _marker + "'.");
+        }
+    }
+
+    /**
+     * Installs the {@code getLocalNew} version of this resource to {@code getLocal}.
+     */
+    public void install () throws IOException {
+        File source = getLocalNew(), dest = getLocal();
+        log.info("- " + source);
+        if (!FileUtil.renameTo(source, dest)) {
+            throw new IOException("Failed to rename " + source + " to " + dest);
+        }
+        // unpack the resource, now that it's installed, and mark it as valid
+        unpackIfNeeded();
+        markAsValid();
+    }
+
+    /**
+     * Unpacks this resource file into the directory that contains it.
+     */
+    public void unpack () throws IOException
+    {
+        // sanity check
+        if (!_isJar && !_isPacked200Jar) {
+            throw new IOException("Requested to unpack non-jar file '" + _local + "'.");
+        }
+        if (_isJar) {
+            FileUtil.unpackJar(new JarFile(_local), _unpacked);
+        } else{
+            FileUtil.unpackPacked200Jar(_local, _unpacked);
+        }
+    }
+
+    /**
+     * Unpacks this resource if needed.
+     */
+    public void unpackIfNeeded () throws IOException {
+        if (shouldUnpack()) {
+            unpack();
+        }
+    }
+
+    /**
+     * Wipes this resource file along with any "validated" marker file that may be associated with
+     * it.
+     */
+    public void erase ()
+    {
+        clearMarker();
+        if (_local.exists() && !_local.delete()) {
+            log.warning("Failed to erase resource '" + _local + "'.");
+        }
+    }
+
+    @Override public int compareTo (Resource other) {
+        return _path.compareTo(other._path);
+    }
+
+    @Override public boolean equals (Object other)
+    {
+        if (other instanceof Resource) {
+            return _path.equals(((Resource)other)._path);
+        } else {
+            return false;
+        }
+    }
+
+    @Override public int hashCode ()
+    {
+        return _path.hashCode();
+    }
+
+    @Override public String toString ()
+    {
+        return _path;
+    }
+
     /** Helper function to simplify the process of reporting progress. */
     protected static void updateProgress (ProgressObserver obs, long pos, long total)
     {
@@ -296,7 +329,7 @@ public class Resource
 
     protected static boolean isJar (String path)
     {
-        return path.endsWith(".jar");
+        return path.endsWith(".jar") || path.endsWith(".jar_new");
     }
 
     protected static boolean isPacked200Jar (String path)
@@ -306,7 +339,7 @@ public class Resource
 
     protected String _path;
     protected URL _remote;
-    protected File _local, _marker, _unpacked;
+    protected File _local, _localNew, _marker, _unpacked;
     protected boolean _unpack, _isJar, _isPacked200Jar;
 
     /** Used to sort the entries in a jar file. */

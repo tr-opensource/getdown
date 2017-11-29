@@ -1,7 +1,7 @@
 //
 // Getdown - application installer, patcher and launcher
-// Copyright (C) 2004-2014 Three Rings Design, Inc.
-// https://raw.github.com/threerings/getdown/master/LICENSE
+// Copyright (C) 2004-2016 Getdown authors
+// https://github.com/threerings/getdown/blob/master/LICENSE
 
 package com.threerings.getdown.tools;
 
@@ -54,16 +54,16 @@ public class JarDiffPatcher implements JarDiffCodes
             jos = new JarOutputStream(new FileOutputStream(target));
             oldJar = new JarFile(oldFile);
             jarDiff = new JarFile(diffFile);
-            Set<String> ignoreSet = new HashSet<String>();
+            Set<String> ignoreSet = new HashSet<>();
 
-            Map<String, String> renameMap = new HashMap<String, String>();
+            Map<String, String> renameMap = new HashMap<>();
             determineNameMapping(jarDiff, ignoreSet, renameMap);
 
             // get all keys in renameMap
             String[] keys = renameMap.keySet().toArray(new String[renameMap.size()]);
 
             // Files to implicit move
-            Set<String> oldjarNames  = new HashSet<String>();
+            Set<String> oldjarNames  = new HashSet<>();
             Enumeration<JarEntry> oldEntries = oldJar.entries();
             if (oldEntries != null) {
                 while  (oldEntries.hasMoreElements()) {
@@ -223,7 +223,7 @@ public class JarDiffPatcher implements JarDiffCodes
     {
         int index = 0;
         int length = path.length();
-        ArrayList<String> sub = new ArrayList<String>();
+        ArrayList<String> sub = new ArrayList<>();
 
         while (index < length) {
             while (index < length && Character.isWhitespace

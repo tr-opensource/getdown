@@ -1,7 +1,7 @@
 //
 // Getdown - application installer, patcher and launcher
-// Copyright (C) 2004-2014 Three Rings Design, Inc.
-// https://raw.github.com/threerings/getdown/master/LICENSE
+// Copyright (C) 2004-2016 Getdown authors
+// https://github.com/threerings/getdown/blob/master/LICENSE
 
 package com.threerings.getdown.tools;
 
@@ -12,6 +12,8 @@ import java.security.GeneralSecurityException;
 
 import org.apache.tools.ant.BuildException;
 import org.apache.tools.ant.Task;
+
+import com.threerings.getdown.data.Digest;
 
 /**
  * An ant task used to create a <code>digest.txt</code> for a Getdown
@@ -64,18 +66,13 @@ public class DigesterTask extends Task
         }
 
         // make sure _storepass and _keyalias are set, if _storepath is set
-        if (_storepath != null) {
-            if (_storepass == null || _storealias == null) {
-                throw new BuildException(
+        if (_storepath != null && (_storepass == null || _storealias == null)) {
+            throw new BuildException(
                     "Must specify both a keystore password and a private key alias.");
-            }
         }
 
         try {
-            Digester.createDigest(_appdir);
-            if (_storepath != null) {
-                Digester.signDigest(_appdir, _storepath, _storepass, _storealias);
-            }
+            Digester.createDigests(_appdir, _storepath, _storepass, _storealias);
         } catch (IOException ioe) {
             throw new BuildException("Error creating digest: " + ioe.getMessage(), ioe);
         } catch (GeneralSecurityException gse) {

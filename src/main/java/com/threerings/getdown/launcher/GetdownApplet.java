@@ -1,7 +1,7 @@
 //
 // Getdown - application installer, patcher and launcher
-// Copyright (C) 2004-2014 Three Rings Design, Inc.
-// https://raw.github.com/threerings/getdown/master/LICENSE
+// Copyright (C) 2004-2016 Getdown authors
+// https://github.com/threerings/getdown/blob/master/LICENSE
 
 package com.threerings.getdown.launcher;
 
@@ -85,7 +85,7 @@ public class GetdownApplet extends JApplet
                 _errmsg = e.getMessage();
             }
 
-            List<Certificate> signers = new ArrayList<Certificate>();
+            List<Certificate> signers = new ArrayList<>();
             Certificate cert = loadCertificate("resource.crt");
             if (cert != null) {
                 signers.add(cert);

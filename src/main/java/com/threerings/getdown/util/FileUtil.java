@@ -1,25 +1,32 @@
 //
 // Getdown - application installer, patcher and launcher
-// Copyright (C) 2004-2014 Three Rings Design, Inc.
-// https://raw.github.com/threerings/getdown/master/LICENSE
+// Copyright (C) 2004-2016 Getdown authors
+// https://github.com/threerings/getdown/blob/master/LICENSE
 
 package com.threerings.getdown.util;
 
 import java.io.*;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Deque;
+import java.util.Enumeration;
 import java.util.List;
+import java.util.jar.JarEntry;
+import java.util.jar.JarFile;
 import java.util.jar.JarOutputStream;
 import java.util.jar.Pack200;
 import java.util.zip.GZIPInputStream;
 
 import com.samskivert.io.StreamUtil;
+import com.samskivert.util.Logger;
 
 import static com.threerings.getdown.Log.log;
 
 /**
  * File related utilities.
  */
-public class FileUtil extends com.samskivert.util.FileUtil
+public class FileUtil
 {
     /**
      * Gets the specified source file to the specified destination file by hook or crook. Windows
@@ -38,19 +45,15 @@ public class FileUtil extends com.samskivert.util.FileUtil
         // place and then delete the old file
         if (dest.exists()) {
             File temp = new File(dest.getPath() + "_old");
-            if (temp.exists()) {
-                if (!temp.delete()) {
-                    log.warning("Failed to delete old intermediate file " + temp + ".");
-                    // the subsequent code will probably fail
-                }
+            if (temp.exists() && !temp.delete()) {
+                log.warning("Failed to delete old intermediate file " + temp + ".");
+                // the subsequent code will probably fail
             }
-            if (dest.renameTo(temp)) {
-                if (source.renameTo(dest)) {
-                    if (!temp.delete()) {
-                        log.warning("Failed to delete intermediate file " + temp + ".");
-                    }
-                    return true;
+            if (dest.renameTo(temp) && source.renameTo(dest)) {
+                if (!temp.delete()) {
+                    log.warning("Failed to delete intermediate file " + temp + ".");
                 }
+                return true;
             }
         }
 
@@ -61,6 +64,9 @@ public class FileUtil extends com.samskivert.util.FileUtil
             fin = new FileInputStream(source);
             fout = new FileOutputStream(dest);
             StreamUtil.copy(fin, fout);
+            // close the input stream now so we can delete 'source'
+            fin.close();
+            fin = null;
             if (!source.delete()) {
                 log.warning("Failed to delete " + source +
                             " after brute force copy to " + dest + ".");
@@ -84,7 +90,7 @@ public class FileUtil extends com.samskivert.util.FileUtil
     public static List<String> readLines (Reader in)
         throws IOException
     {
-        List<String> lines = new ArrayList<String>();
+        List<String> lines = new ArrayList<>();
         try {
             BufferedReader bin = new BufferedReader(in);
             for (String line = null; (line = bin.readLine()) != null; lines.add(line)) {}
@@ -95,10 +101,62 @@ public class FileUtil extends com.samskivert.util.FileUtil
     }
 
     /**
+     * Unpacks the specified jar file intto the specified target directory.
+     */
+    public static void unpackJar (JarFile jar, File target) throws IOException
+    {
+        try {
+            Enumeration<?> entries = jar.entries();
+            while (entries.hasMoreElements()) {
+                JarEntry entry = (JarEntry)entries.nextElement();
+                File efile = new File(target, entry.getName());
+
+                // if we're unpacking a normal jar file, it will have special path
+                // entries that allow us to create our directories first
+                if (entry.isDirectory()) {
+                    if (!efile.exists() && !efile.mkdir()) {
+                        log.warning("Failed to create jar entry path", "jar", jar, "entry", entry);
+                    }
+                    continue;
+                }
+
+                // but some do not, so we want to ensure that our directories exist
+                // prior to getting down and funky
+                File parent = new File(efile.getParent());
+                if (!parent.exists() && !parent.mkdirs()) {
+                    log.warning("Failed to create jar entry parent", "jar", jar, "parent", parent);
+                    continue;
+                }
+
+                BufferedOutputStream fout = null;
+                InputStream jin = null;
+                try {
+                    fout = new BufferedOutputStream(new FileOutputStream(efile));
+                    jin = jar.getInputStream(entry);
+                    StreamUtil.copy(jin, fout);
+                } catch (Exception e) {
+                    throw new IOException(
+                        Logger.format("Failure unpacking", "jar", jar, "entry", efile), e);
+                } finally {
+                    StreamUtil.close(jin);
+                    StreamUtil.close(fout);
+                }
+            }
+
+        } finally {
+            try {
+                jar.close();
+            } catch (Exception e) {
+                log.warning("Failed to close jar file", "jar", jar, "error", e);
+            }
+        }
+    }
+
+    /**
      * Unpacks a pack200 packed jar file from {@code packedJar} into {@code target}. If {@code
      * packedJar} has a {@code .gz} extension, it will be gunzipped first.
      */
-    public static boolean unpackPacked200Jar (File packedJar, File target)
+    public static void unpackPacked200Jar (File packedJar, File target) throws IOException
     {
         InputStream packedJarIn = null;
         FileOutputStream extractedJarFileOut = null;
@@ -112,16 +170,54 @@ public class FileUtil extends com.samskivert.util.FileUtil
             }
             Pack200.Unpacker unpacker = Pack200.newUnpacker();
             unpacker.unpack(packedJarIn, jarOutputStream);
-            return true;
-
-        } catch (IOException e) {
-            log.warning("Failed to unpack packed 200 jar file", "jar", packedJar, "error", e);
-            return false;
 
         } finally {
             StreamUtil.close(jarOutputStream);
             StreamUtil.close(extractedJarFileOut);
             StreamUtil.close(packedJarIn);
+        }
+    }
+
+    /**
+     * Copies the given {@code source} file to the given {@code target}.
+     */
+    public static void copy (File source, File target) throws IOException {
+        FileInputStream in = null;
+        FileOutputStream out = null;
+        try {
+            in = new FileInputStream(source);
+            out = new FileOutputStream(target);
+            StreamUtil.copy(in, out);
+        } finally {
+            StreamUtil.close(in);
+            StreamUtil.close(out);
+        }
+    }
+
+    /**
+     * Used by {@link #walkTree}.
+     */
+    public interface Visitor
+    {
+        void visit (File file);
+    }
+
+    /**
+     * Walks all files in {@code root}, calling {@code visitor} on each file in the tree.
+     */
+    public static void walkTree (File root, Visitor visitor)
+    {
+        Deque<File> stack = new ArrayDeque<>(Arrays.asList(root.listFiles()));
+        while (!stack.isEmpty()) {
+            File currentFile = stack.pop();
+            if (currentFile.exists()) {
+                visitor.visit(currentFile);
+                if (currentFile.isDirectory()) {
+                    for (File file: currentFile.listFiles()) {
+                        stack.push(file);
+                    }
+                }
+            }
         }
     }
 }

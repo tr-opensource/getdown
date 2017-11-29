@@ -1,7 +1,7 @@
 //
 // Getdown - application installer, patcher and launcher
-// Copyright (C) 2004-2014 Three Rings Design, Inc.
-// https://raw.github.com/threerings/getdown/master/LICENSE
+// Copyright (C) 2004-2016 Getdown authors
+// https://github.com/threerings/getdown/blob/master/LICENSE
 
 package com.threerings.getdown.data;
 
@@ -13,12 +13,14 @@ import java.net.MalformedURLException;
 import java.net.URL;
 import java.net.URLClassLoader;
 import java.net.URLConnection;
+import java.net.URLEncoder;
 import java.nio.channels.FileChannel;
 import java.nio.channels.FileLock;
 import java.nio.channels.OverlappingFileLockException;
 import java.security.*;
 import java.security.cert.Certificate;
 import java.util.*;
+import java.util.concurrent.*;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -33,6 +35,8 @@ import com.samskivert.util.StringUtil;
 
 import org.apache.commons.codec.binary.Base64;
 
+import com.threerings.getdown.classpath.ClassPaths;
+import com.threerings.getdown.classpath.ClassPath;
 import com.threerings.getdown.launcher.RotatingBackgrounds;
 import com.threerings.getdown.util.*;
 
@@ -56,6 +60,9 @@ public class Application
 
     /** Suffix used for control file signatures. */
     public static final String SIGNATURE_SUFFIX = ".sig";
+
+    /** A special classname that means 'use -jar code.jar' instead of a classname. */
+    public static final String MANIFEST_CLASS = "manifest";
 
     /** Used to communicate information about the UI displayed when updating the application. */
     public static class UpdateInterface
@@ -230,6 +237,32 @@ public class Application
     }
 
     /**
+     * Returns the configured application directory.
+     */
+    public File getAppdir()
+    {
+        return _appdir;
+    }
+
+    /**
+     * Returns whether the application should cache code resources prior to launching the
+     * application.
+     */
+    public boolean useCodeCache ()
+    {
+        return _useCodeCache;
+    }
+
+    /**
+     * Returns the number of days a cached code resource is allowed to stay unused before it
+     * becomes eligible for deletion.
+     */
+    public int getCodeCacheRetentionDays ()
+    {
+        return _codeCacheRetentionDays;
+    }
+
+    /**
      * Returns a resource that refers to the application configuration file itself.
      */
     public Resource getConfigResource ()
@@ -258,12 +291,20 @@ public class Application
     }
 
     /**
+     * Returns the digest of the given {@code resource}.
+     */
+    public String getDigest (Resource resource)
+    {
+        return _digest.getDigest(resource);
+    }
+
+    /**
      * Returns a list of all the active {@link Resource} objects used by this application (code and
      * non-code).
      */
     public List<Resource> getAllActiveResources ()
     {
-        List<Resource> allResources = new ArrayList<Resource>();
+        List<Resource> allResources = new ArrayList<>();
         allResources.addAll(getActiveCodeResources());
         allResources.addAll(getActiveResources());
         return allResources;
@@ -309,7 +350,7 @@ public class Application
      */
     public List<Resource> getActiveCodeResources ()
     {
-        ArrayList<Resource> codes = new ArrayList<Resource>();
+        ArrayList<Resource> codes = new ArrayList<>();
         codes.addAll(getCodeResources());
         for (AuxGroup aux : getAuxGroups()) {
             if (isAuxGroupActive(aux.name)) {
@@ -324,7 +365,7 @@ public class Application
      */
     public List<Resource> getActiveResources ()
     {
-        ArrayList<Resource> rsrcs = new ArrayList<Resource>();
+        ArrayList<Resource> rsrcs = new ArrayList<>();
         rsrcs.addAll(getResources());
         for (AuxGroup aux : getAuxGroups()) {
             if (isAuxGroupActive(aux.name)) {
@@ -463,16 +504,17 @@ public class Application
     {
         Map<String,Object> cdata = null;
         File config = _config;
+        ConfigUtil.ParseOpts opts = ConfigUtil.createOpts(checkPlatform);
         try {
             // if we have a configuration file, read the data from it
             if (config.exists()) {
-                cdata = ConfigUtil.parseConfig(_config, checkPlatform);
+                cdata = ConfigUtil.parseConfig(_config, opts);
             }
             // otherwise, try reading data from our backup config file; thanks to funny windows
             // bullshit, we have to do this backup file fiddling in case we got screwed while
             // updating getdown.txt during normal operation
             else if ((config = getLocalPath(CONFIG_FILE + "_old")).exists()) {
-                cdata = ConfigUtil.parseConfig(config, checkPlatform);
+                cdata = ConfigUtil.parseConfig(config, opts);
             }
             // otherwise, issue a warning that we found no getdown file
             else {
@@ -487,7 +529,7 @@ public class Application
         if (cdata == null) {
             String appbase = SysProps.appBase();
             log.info("Attempting to obtain 'appbase' from system property", "appbase", appbase);
-            cdata = new HashMap<String,Object>();
+            cdata = new HashMap<>();
             cdata.put("appbase", appbase);
         }
 
@@ -497,13 +539,14 @@ public class Application
         if (_appbase == null) {
             throw new RuntimeException("m.missing_appbase");
         }
+
+        // check if we're overriding the domain in the appbase
+        _appbase = overrideAppbase(_appbase);
+
         // make sure there's a trailing slash
         if (!_appbase.endsWith("/")) {
             _appbase = _appbase + "/";
         }
-
-        // check if we're overriding the domain in the appbase
-        _appbase = replaceDomain(_appbase);
 
         // extract our version information
         String vstr = (String)cdata.get("version");
@@ -520,7 +563,11 @@ public class Application
         // check for a latest config URL
         String latest = (String)cdata.get("latest");
         if (latest != null) {
-            latest = replaceDomain(latest);
+            if (latest.startsWith(_appbase)) {
+                latest = _appbase + latest.substring(_appbase.length());
+            } else {
+                latest = replaceDomain(latest);
+            }
             try {
                 _latest = new URL(latest);
             } catch (MalformedURLException mue) {
@@ -528,13 +575,16 @@ public class Application
             }
         }
 
-        String prefix = StringUtil.isBlank(_appid) ? "" : (_appid + ".");
+        String appPrefix = StringUtil.isBlank(_appid) ? "" : (_appid + ".");
 
         // determine our application class name
-        _class = (String)cdata.get(prefix + "class");
+        _class = (String)cdata.get(appPrefix + "class");
         if (_class == null) {
             throw new IOException("m.missing_class");
         }
+
+        // determine whether we want strict comments
+        _strictComments = Boolean.parseBoolean((String)cdata.get("strict_comments"));
 
         // check to see if we're using a custom java.version property and regex
         vstr = (String)cdata.get("java_version_prop");
@@ -572,12 +622,12 @@ public class Application
         // check for tracking progress percent configuration
         String trackPcts = (String)cdata.get("tracking_percents");
         if (!StringUtil.isBlank(trackPcts)) {
-            _trackingPcts = new HashSet<Integer>();
+            _trackingPcts = new HashSet<>();
             for (int pct : StringUtil.parseIntArray(trackPcts)) {
                 _trackingPcts.add(pct);
             }
         } else if (!StringUtil.isBlank(_trackingURL)) {
-            _trackingPcts = new HashSet<Integer>();
+            _trackingPcts = new HashSet<>();
             _trackingPcts.add(50);
         }
 
@@ -613,43 +663,35 @@ public class Application
 
         // parse our auxiliary resource groups
         for (String auxgroup : parseList(cdata, "auxgroups")) {
-            ArrayList<Resource> codes = new ArrayList<Resource>();
+            ArrayList<Resource> codes = new ArrayList<>();
             parseResources(cdata, auxgroup + ".code", false, codes);
             parseResources(cdata, auxgroup + ".ucode", true, codes);
-            ArrayList<Resource> rsrcs = new ArrayList<Resource>();
+            ArrayList<Resource> rsrcs = new ArrayList<>();
             parseResources(cdata, auxgroup + ".resource", false, rsrcs);
             parseResources(cdata, auxgroup + ".uresource", true, rsrcs);
             _auxgroups.put(auxgroup, new AuxGroup(auxgroup, codes, rsrcs));
         }
 
-        // transfer our JVM arguments
+        // transfer our JVM arguments (we include both "global" args and app_id-prefixed args)
         String[] jvmargs = ConfigUtil.getMultiValue(cdata, "jvmarg");
-        if (jvmargs != null) {
-            for (String jvmarg : jvmargs) {
-                _jvmargs.add(jvmarg);
-            }
+        addAll(jvmargs, _jvmargs);
+        if (appPrefix.length() > 0) {
+            jvmargs = ConfigUtil.getMultiValue(cdata, appPrefix + "jvmarg");
+            addAll(jvmargs, _jvmargs);
         }
 
         // Add the launch specific JVM arguments
-        for (String arg : _extraJvmArgs) {
-            _jvmargs.add(arg);
-        }
+        addAll(_extraJvmArgs, _jvmargs);
 
         // get the set of optimum JVM arguments
         _optimumJvmArgs = ConfigUtil.getMultiValue(cdata, "optimum_jvmarg");
 
         // transfer our application arguments
-        String[] appargs = ConfigUtil.getMultiValue(cdata, prefix + "apparg");
-        if (appargs != null) {
-            for (String apparg : appargs) {
-                _appargs.add(apparg);
-            }
-        }
+        String[] appargs = ConfigUtil.getMultiValue(cdata, appPrefix + "apparg");
+        addAll(appargs, _appargs);
 
         // add the launch specific application arguments
-        for (String arg : _extraAppArgs) {
-            _appargs.add(arg);
-        }
+        addAll(_extraAppArgs, _appargs);
 
         // look for custom arguments
         fillAssignmentListFromPairs("extra.txt", _txtJvmArgs);
@@ -660,6 +702,12 @@ public class Application
         // look for a debug.txt file which causes us to run in java.exe on Windows so that we can
         // obtain a thread dump of the running JVM
         _windebug = getLocalPath("debug.txt").exists();
+
+        // whether to cache code resources and launch from cache
+        _useCodeCache = Boolean.parseBoolean((String) cdata.get("use_code_cache"));
+        String ccRetentionDays = (String) cdata.get("code_cache_retention_days");
+        _codeCacheRetentionDays = ccRetentionDays == null ? 7 :
+            Integer.parseInt(ccRetentionDays);
 
         // parse and return our application config
         UpdateInterface ui = new UpdateInterface();
@@ -729,7 +777,7 @@ public class Application
         File pairFile = getLocalPath(pairLocation);
         if (pairFile.exists()) {
             try {
-                List<String[]> args = ConfigUtil.parsePairs(pairFile, false);
+                List<String[]> args = ConfigUtil.parsePairs(pairFile, ConfigUtil.createOpts(false));
                 for (String[] pair : args) {
                     if (pair[1].length() == 0) {
                         collector.add(pair[0]);
@@ -868,7 +916,7 @@ public class Application
             // now re-download our control files; we download the digest first so that if it fails,
             // our config file will still reference the old version and re-running the updater will
             // start the whole process over again
-            downloadDigestFile();
+            downloadDigestFiles();
             downloadConfigFile();
 
         } catch (IOException ex) {
@@ -897,23 +945,21 @@ public class Application
     public Process createProcess (boolean optimum)
         throws IOException
     {
-        // create our classpath
-        StringBuilder cpbuf = new StringBuilder();
-        for (Resource rsrc : getActiveCodeResources()) {
-            if (cpbuf.length() > 0) {
-                cpbuf.append(File.pathSeparator);
-            }
-            cpbuf.append(rsrc.getFinalTarget().getAbsolutePath());
-        }
-
-        ArrayList<String> args = new ArrayList<String>();
+        ArrayList<String> args = new ArrayList<>();
 
         // reconstruct the path to the JVM
         args.add(LaunchUtil.getJVMPath(_appdir, _windebug || optimum));
 
-        // add the classpath arguments
-        args.add("-classpath");
-        args.add(cpbuf.toString());
+        // check whether we're using -jar mode or -classpath mode
+        boolean dashJarMode = MANIFEST_CLASS.equals(_class);
+
+        // add the -classpath arguments if we're not in -jar mode
+        ClassPath classPath = ClassPaths.buildClassPath(this);
+
+        if (!dashJarMode) {
+            args.add("-classpath");
+            args.add(classPath.asArgumentString());
+        }
 
         // we love our Mac users, so we do nice things to preserve our application identity
         if (RunAnywhere.isMacOS()) {
@@ -926,6 +972,8 @@ public class Application
         if ((proxyHost = System.getProperty("http.proxyHost")) != null) {
             args.add("-Dhttp.proxyHost=" + proxyHost);
             args.add("-Dhttp.proxyPort=" + System.getProperty("http.proxyPort"));
+            args.add("-Dhttps.proxyHost=" + proxyHost);
+            args.add("-Dhttps.proxyPort=" + System.getProperty("http.proxyPort"));
         }
 
         // add the marker indicating the app is running in getdown
@@ -957,8 +1005,13 @@ public class Application
             args.add(processArg(string));
         }
 
-        // add the application class name
-        args.add(_class);
+        // if we're in -jar mode add those arguments, otherwise add the app class name
+        if (dashJarMode) {
+            args.add("-jar");
+            args.add(classPath.asArgumentString());
+        } else {
+            args.add(_class);
+        }
 
         // finally add the application arguments
         for (String string : _appargs) {
@@ -980,14 +1033,14 @@ public class Application
      */
     protected String[] createEnvironment ()
     {
-        List<String> envvar = new ArrayList<String>();
+        List<String> envvar = new ArrayList<>();
         fillAssignmentListFromPairs("env.txt", envvar);
         if (envvar.isEmpty()) {
             log.info("Didn't find any custom environment variables, not setting any.");
             return null;
         }
 
-        List<String> envAssignments = new ArrayList<String>();
+        List<String> envAssignments = new ArrayList<>();
         for (String assignment : envvar) {
             envAssignments.add(processArg(assignment));
         }
@@ -1002,26 +1055,23 @@ public class Application
     /**
      * Runs this application directly in the current VM.
      */
-    public void invokeDirect (JApplet applet)
+    public void invokeDirect (JApplet applet) throws IOException
     {
-        // create a custom class loader
-        ArrayList<URL> jars = new ArrayList<URL>();
-        for (Resource rsrc : getActiveCodeResources()) {
-            try {
-                jars.add(new URL("file", "", rsrc.getFinalTarget().getAbsolutePath()));
-            } catch (Exception e) {
-                e.printStackTrace(System.err);
-            }
-        }
-        URLClassLoader loader = new URLClassLoader(
-            jars.toArray(new URL[jars.size()]),
-            ClassLoader.getSystemClassLoader()) {
+        ClassPath classPath = ClassPaths.buildClassPath(this);
+        URL[] jarUrls = classPath.asUrls();
+
+        // create custom class loader
+        URLClassLoader loader = new URLClassLoader(jarUrls, ClassLoader.getSystemClassLoader()) {
             @Override protected PermissionCollection getPermissions (CodeSource code) {
                 Permissions perms = new Permissions();
                 perms.add(new AllPermission());
                 return perms;
             }
         };
+        Thread.currentThread().setContextClassLoader(loader);
+
+        log.info("Configured URL class loader:");
+        for (URL url : jarUrls) log.info("  " + url);
 
         // configure any system properties that we can
         for (String jvmarg : _jvmargs) {
@@ -1037,7 +1087,7 @@ public class Application
         }
 
         // pass along any pass-through arguments
-        Map<String, String> passProps = new HashMap<String, String>();
+        Map<String, String> passProps = new HashMap<>();
         for (Map.Entry<Object, Object> entry : System.getProperties().entrySet()) {
             String key = (String)entry.getKey();
             if (key.startsWith(PROP_PASSTHROUGH_PREFIX)) {
@@ -1053,16 +1103,22 @@ public class Application
         // make a note that we're running in "applet" mode
         System.setProperty("applet", "true");
 
+        // prepare our app arguments
+        String[] args = new String[_appargs.size()];
+        for (int ii = 0; ii < args.length; ii++) args[ii] = processArg(_appargs.get(ii));
+
         try {
+            log.info("Loading " + _class);
             Class<?> appclass = loader.loadClass(_class);
-            String[] args = _appargs.toArray(new String[_appargs.size()]);
             Method main;
             try {
                 // first see if the class has a special applet-aware main
                 main = appclass.getMethod("main", JApplet.class, SA_PROTO.getClass());
+                log.info("Invoking main(JApplet, {" + StringUtil.join(args, ", ") + "})");
                 main.invoke(null, new Object[] { applet, args });
             } catch (NoSuchMethodException nsme) {
                 main = appclass.getMethod("main", SA_PROTO.getClass());
+                log.info("Invoking main({" + StringUtil.join(args, ", ") + "})");
                 main.invoke(null, new Object[] { args });
             }
         } catch (Exception e) {
@@ -1075,6 +1131,21 @@ public class Application
     {
         arg = arg.replace("%APPDIR%", _appdir.getAbsolutePath());
         arg = arg.replace("%VERSION%", String.valueOf(_version));
+
+        // if this argument contains %ENV.FOO% replace those with the associated values looked up
+        // from the environment
+        if (arg.contains(ENV_VAR_PREFIX)) {
+            StringBuffer sb = new StringBuffer();
+            Matcher matcher = ENV_VAR_PATTERN.matcher(arg);
+            while (matcher.find()) {
+                String varName = matcher.group(1), varValue = System.getenv(varName);
+                if (varName == null) varName = "MISSING:" + varName;
+                matcher.appendReplacement(sb, varValue);
+            }
+            matcher.appendTail(sb);
+            arg = sb.toString();
+        }
+
         return arg;
     }
 
@@ -1096,16 +1167,10 @@ public class Application
         log.info("Verifying application: " + _vappbase);
         log.info("Version: " + _version);
         log.info("Class: " + _class);
-//         log.info("Code: " +
-//                  StringUtil.toString(getCodeResources().iterator()));
-//         log.info("Resources: " +
-//                  StringUtil.toString(getActiveResources().iterator()));
-//         log.info("JVM Args: " + StringUtil.toString(_jvmargs.iterator()));
-//         log.info("App Args: " + StringUtil.toString(_appargs.iterator()));
 
         // this will read in the contents of the digest file and validate itself
         try {
-            _digest = new Digest(_appdir);
+            _digest = new Digest(_appdir, _strictComments);
         } catch (IOException ioe) {
             log.info("Failed to load digest: " + ioe.getMessage() + ". Attempting recovery...");
         }
@@ -1118,8 +1183,8 @@ public class Application
             String olddig = (_digest == null) ? "" : _digest.getMetaDigest();
             try {
                 status.updateStatus("m.checking");
-                downloadDigestFile();
-                _digest = new Digest(_appdir);
+                downloadDigestFiles();
+                _digest = new Digest(_appdir, _strictComments);
                 if (!olddig.equals(_digest.getMetaDigest())) {
                     log.info("Unversioned digest changed. Revalidating...");
                     status.updateStatus("m.validating");
@@ -1136,8 +1201,8 @@ public class Application
         // exceptions to propagate up to the caller as there is nothing else we can do
         if (_digest == null) {
             status.updateStatus("m.updating_metadata");
-            downloadDigestFile();
-            _digest = new Digest(_appdir);
+            downloadDigestFiles();
+            _digest = new Digest(_appdir, _strictComments);
         }
 
         // now verify the contents of our main config file
@@ -1147,8 +1212,8 @@ public class Application
             // attempt to redownload both of our metadata files; again we pass errors up to our
             // caller because there's nothing we can do to automatically recover
             downloadConfigFile();
-            downloadDigestFile();
-            _digest = new Digest(_appdir);
+            downloadDigestFiles();
+            _digest = new Digest(_appdir, _strictComments);
             // revalidate everything if we end up downloading new metadata
             clearValidationMarkers();
             // if the new copy validates, reinitialize ourselves; otherwise report baffling hoseage
@@ -1176,9 +1241,9 @@ public class Application
                 InputStream in = null;
                 PrintStream out = null;
                 try {
-                    in = ConnectionUtil.open(_latest).getInputStream();
+                    in = ConnectionUtil.open(_latest, 0, 0).getInputStream();
                     BufferedReader bin = new BufferedReader(new InputStreamReader(in));
-                    for (String[] pair : ConfigUtil.parsePairs(bin, false)) {
+                    for (String[] pair : ConfigUtil.parsePairs(bin, ConfigUtil.createOpts(false))) {
                         if (pair[0].equals("version")) {
                             _targetVersion = Math.max(Long.parseLong(pair[1]), _targetVersion);
                             if (fileVersion != -1 && _targetVersion > fileVersion) {
@@ -1207,66 +1272,122 @@ public class Application
      * that do not exist or fail the verification process will be returned. If all resources are
      * ready to go, null will be returned and the application is considered ready to run.
      *
+     * @param obs a progress observer that will be notified of verification progress. NOTE: this
+     * observer may be called from arbitrary threads, so if you update a UI based on calls to it,
+     * you have to take care to get back to your UI thread.
      * @param alreadyValid if non-null a 1 element array that will have the number of "already
      * validated" resources filled in.
      * @param unpacked a set to populate with unpacked resources.
+     * @param toInstall a list into which to add resources that need to be installed.
+     * @param toDownload a list into which to add resources that need to be downloaded.
      */
-    public List<Resource> verifyResources (
-        ProgressObserver obs, int[] alreadyValid, Set<Resource> unpacked)
-            throws InterruptedException
+    public void verifyResources (
+        ProgressObserver obs, int[] alreadyValid, Set<Resource> unpacked,
+        Set<Resource> toInstall, Set<Resource> toDownload)
+        throws InterruptedException
     {
+        // resources are verified on background threads supplied by the thread pool, and progress
+        // is reported by posting runnable actions to the actions queue which is processed by the
+        // main (UI) thread
+        Executor exec = Executors.newFixedThreadPool(Runtime.getRuntime().availableProcessors());
+        final BlockingQueue<Runnable> actions = new LinkedBlockingQueue<Runnable>();
+        final int[] completed = new int[1];
+
+        long start = System.currentTimeMillis();
+
+        // obtain the sizes of the resources to validate
         List<Resource> rsrcs = getAllActiveResources();
-        List<Resource> failures = new ArrayList<Resource>();
-
-        // total up the file size of the resources to validate
-        long totalSize = 0L;
-        for (Resource rsrc : rsrcs) {
-            totalSize += rsrc.getLocal().length();
+        long[] sizes = new long[rsrcs.size()];
+        long totalSize = 0;
+        for (int ii = 0; ii < sizes.length; ii++) {
+            totalSize += sizes[ii] = rsrcs.get(ii).getLocal().length();
         }
+        final ProgressObserver fobs = obs;
+        // as long as we forward aggregated progress updates to the UI thread, having multiple
+        // threads update a progress aggregator is "mostly" thread-safe
+        final ProgressAggregator pagg = new ProgressAggregator(new ProgressObserver() {
+            public void progress (final int percent) {
+                actions.add(new Runnable() {
+                    public void run () {
+                        fobs.progress(percent);
+                    }
+                });
+            }
+        }, sizes);
 
-        MetaProgressObserver mpobs = new MetaProgressObserver(obs, totalSize);
-        boolean noUnpack = SysProps.noUnpack();
-        for (Resource rsrc : rsrcs) {
+        final int[] fAlreadyValid = alreadyValid;
+        final Set<Resource> toInstallAsync = new ConcurrentSkipListSet<>(toInstall);
+        final Set<Resource> toDownloadAsync = new ConcurrentSkipListSet<>();
+        final Set<Resource> unpackedAsync = new ConcurrentSkipListSet<>();
+
+        for (int ii = 0; ii < sizes.length; ii++) {
+            final Resource rsrc = rsrcs.get(ii);
             if (Thread.interrupted()) {
                 throw new InterruptedException("m.applet_stopped");
             }
-            mpobs.startElement(rsrc.getLocal().length());
-
-            if (rsrc.isMarkedValid()) {
-                if (alreadyValid != null) {
-                    alreadyValid[0]++;
+            final int index = ii;
+            exec.execute(new Runnable() {
+                public void run () {
+                    verifyResource(rsrc, pagg.startElement(index), fAlreadyValid,
+                                   unpackedAsync, toInstallAsync, toDownloadAsync);
+                    actions.add(new Runnable() {
+                        public void run () {
+                            completed[0] += 1;
+                        }
+                    });
                 }
-                mpobs.progress(100);
-                continue;
-            }
-
-            try {
-                if (_digest.validateResource(rsrc, mpobs)) {
-                    // unpack this resource if appropriate
-                    if (noUnpack || !rsrc.shouldUnpack()) {
-                        // finally note that this resource is kosher
-                        rsrc.markAsValid();
-                        continue;
-                    }
-                    if (rsrc.unpack()) {
-                        unpacked.add(rsrc);
-                        rsrc.markAsValid();
-                        continue;
-                    }
-                    log.info("Failure unpacking resource", "rsrc", rsrc);
-                }
-
-            } catch (Exception e) {
-                log.info("Failure validating resource. Requesting redownload...",
-                    "rsrc", rsrc, "error", e);
-
-            } finally {
-                mpobs.progress(100);
-            }
-            failures.add(rsrc);
+            });
         }
 
-        return (failures.size() == 0) ? null : failures;
+        while (completed[0] < rsrcs.size()) {
+            // we should be getting progress completion updates WAY more often than one every
+            // minute, so if things freeze up for 60 seconds, abandon ship
+            Runnable action = actions.poll(60, TimeUnit.SECONDS);
+            action.run();
+        }
+
+        toInstall.addAll(toInstallAsync);
+        toDownload.addAll(toDownloadAsync);
+        unpacked.addAll(unpackedAsync);
+
+        long complete = System.currentTimeMillis();
+        log.info("Verified resources", "count", rsrcs.size(), "size", (totalSize/1024) + "k",
+                 "duration", (complete-start) + "ms");
+    }
+
+    private void verifyResource (Resource rsrc, ProgressObserver obs, int[] alreadyValid,
+                                 Set<Resource> unpacked,
+                                 Set<Resource> toInstall, Set<Resource> toDownload) {
+        if (rsrc.isMarkedValid()) {
+            if (alreadyValid != null) {
+                alreadyValid[0]++;
+            }
+            obs.progress(100);
+            return;
+        }
+
+        try {
+            if (_digest.validateResource(rsrc, obs)) {
+                // if the resource has a _new file, add it to to-install list
+                if (rsrc.getLocalNew().exists()) {
+                    toInstall.add(rsrc);
+                    return;
+                }
+                // unpack this resource if appropriate
+                rsrc.unpackIfNeeded();
+                unpacked.add(rsrc);
+                rsrc.markAsValid();
+                return;
+            }
+
+        } catch (Exception e) {
+            log.info("Failure verifying resource. Requesting redownload...",
+                     "rsrc", rsrc, "error", e);
+
+        } finally {
+            obs.progress(100);
+        }
+        toDownload.add(rsrc);
     }
 
     /**
@@ -1279,27 +1400,33 @@ public class Application
     {
         List<Resource> rsrcs = getActiveResources();
 
-        // total up the file size of the resources to unpack
-        long totalSize = 0L;
+        // remove resources that we don't want to unpack
         for (Iterator<Resource> it = rsrcs.iterator(); it.hasNext(); ) {
             Resource rsrc = it.next();
-            if (rsrc.shouldUnpack() && !unpacked.contains(rsrc)) {
-                totalSize += rsrc.getLocal().length();
-            } else {
+            if (!rsrc.shouldUnpack() || unpacked.contains(rsrc)) {
                 it.remove();
             }
         }
 
-        MetaProgressObserver mpobs = new MetaProgressObserver(obs, totalSize);
-        for (Resource rsrc : rsrcs) {
+        // obtain the sizes of the resources to unpack
+        long[] sizes = new long[rsrcs.size()];
+        for (int ii = 0; ii < sizes.length; ii++) {
+            sizes[ii] = rsrcs.get(ii).getLocal().length();
+        }
+
+        ProgressAggregator pagg = new ProgressAggregator(obs, sizes);
+        for (int ii = 0; ii < sizes.length; ii++) {
             if (Thread.interrupted()) {
                 throw new InterruptedException("m.applet_stopped");
             }
-            mpobs.startElement(rsrc.getLocal().length());
-            if (!rsrc.unpack()) {
-                log.info("Failure unpacking resource", "rsrc", rsrc);
+            Resource rsrc = rsrcs.get(ii);
+            ProgressObserver pobs = pagg.startElement(ii);
+            try {
+                rsrc.unpack();
+            } catch (IOException ioe) {
+                log.warning("Failure unpacking resource", "rsrc", rsrc, ioe);
             }
-            mpobs.progress(100);
+            pobs.progress(100);
         }
     }
 
@@ -1399,13 +1526,15 @@ public class Application
     }
 
     /**
-     * Downloads a copy of Digest.DIGEST_FILE and validates its signature.
+     * Downloads the digest files and validates their signature.
      * @throws IOException
      */
-    protected void downloadDigestFile ()
+    protected void downloadDigestFiles ()
         throws IOException
     {
-        downloadControlFile(Digest.DIGEST_FILE, true);
+        for (int version = 1; version <= Digest.VERSION; version++) {
+            downloadControlFile(Digest.digestFile(version), true);
+        }
     }
 
     /**
@@ -1447,7 +1576,7 @@ public class Application
                     FileInputStream dataInput = null;
                     try {
                         dataInput = new FileInputStream(target);
-                        Signature sig = Signature.getInstance("SHA1withRSA");
+                        Signature sig = Signature.getInstance(Digest.SIG_ALGO);
                         sig.initVerify(cert);
                         while ((length = dataInput.read(buffer)) != -1) {
                             sig.update(buffer, 0, length);
@@ -1513,18 +1642,13 @@ public class Application
         InputStream fin = null;
         FileOutputStream fout = null;
         try {
-            URLConnection uconn = ConnectionUtil.open(targetURL);
+            URLConnection uconn = ConnectionUtil.open(targetURL, 0, 0);
             // we have to tell Java not to use caches here, otherwise it will cache any request for
             // same URL for the lifetime of this JVM (based on the URL string, not the URL object);
             // if the getdown.txt file, for example, changes in the meanwhile, we would never hear
             // about it; turning off caches is not a performance concern, because when Getdown asks
             // to download a file, it expects it to come over the wire, not from a cache
             uconn.setUseCaches(false);
-            // configure a connect timeout if requested
-            int ctimeout = SysProps.connectTimeout();
-            if (ctimeout > 0) {
-                uconn.setConnectTimeout(ctimeout * 1000);
-            }
             fin = uconn.getInputStream();
             fout = new FileOutputStream(target);
             StreamUtil.copy(fin, fout);
@@ -1568,12 +1692,21 @@ public class Application
         return (rect == null) ? def : rect;
     }
 
+    /** Helper function to add all values in {@code values} (if non-null) to {@code target}. */
+    protected static void addAll (String[] values, List<String> target) {
+        if (values != null) {
+            for (String value : values) {
+                target.add(value);
+            }
+        }
+    }
+
     /**
      * Make an immutable List from the specified int array.
      */
     public static List<Integer> intsToList (int[] values)
     {
-        List<Integer> list = new ArrayList<Integer>(values.length);
+        List<Integer> list = new ArrayList<>(values.length);
         for (int val : values) {
             list.add(val);
         }
@@ -1665,6 +1798,18 @@ public class Application
     }
 
     /**
+     * Applies {@code appbase_override} or {@code appbase_domain} if they are set.
+     */
+    protected String overrideAppbase (String appbase) {
+        String appbaseOverride = SysProps.appbaseOverride();
+        if (appbaseOverride != null) {
+            return appbaseOverride;
+        } else {
+            return replaceDomain(appbase);
+        }
+    }
+
+    /**
      * If appbase_domain property is set, replace the domain on the provided string.
      */
     protected String replaceDomain (String appbase)
@@ -1682,8 +1827,14 @@ public class Application
      */
     protected static String encodePath (String path)
     {
-        // URLEncoder is too fancy for paths, we want to keep /
-        return path.replace(" ", "%20");
+        try {
+            // we want to keep slashes because we're encoding an entire path; also we need to turn
+            // + into %20 because web servers don't like + in paths or file names, blah
+            return URLEncoder.encode(path, "UTF-8").replace("%2F", "/").replace("+", "%20");
+        } catch (UnsupportedEncodingException ue) {
+            log.warning("Failed to URL encode " + path + ": " + ue);
+            return path;
+        }
     }
 
     /**
@@ -1713,6 +1864,7 @@ public class Application
     protected String _class;
     protected String _name;
     protected String _dockIconPath;
+    protected boolean _strictComments;
     protected boolean _windebug;
     protected boolean _allowOffline;
 
@@ -1731,21 +1883,24 @@ public class Application
     protected boolean _javaExactVersionRequired;
     protected String _javaLocation;
 
-    protected List<Resource> _codes = new ArrayList<Resource>();
-    protected List<Resource> _resources = new ArrayList<Resource>();
+    protected List<Resource> _codes = new ArrayList<>();
+    protected List<Resource> _resources = new ArrayList<>();
 
-    protected Map<String,AuxGroup> _auxgroups = new HashMap<String,AuxGroup>();
-    protected Map<String,Boolean> _auxactive = new HashMap<String,Boolean>();
+    protected boolean _useCodeCache;
+    protected int _codeCacheRetentionDays;
 
-    protected List<String> _jvmargs = new ArrayList<String>();
-    protected List<String> _appargs = new ArrayList<String>();
+    protected Map<String,AuxGroup> _auxgroups = new HashMap<>();
+    protected Map<String,Boolean> _auxactive = new HashMap<>();
+
+    protected List<String> _jvmargs = new ArrayList<>();
+    protected List<String> _appargs = new ArrayList<>();
 
     protected String[] _extraJvmArgs;
     protected String[] _extraAppArgs;
 
     protected String[] _optimumJvmArgs;
 
-    protected List<String> _txtJvmArgs = new ArrayList<String>();
+    protected List<String> _txtJvmArgs = new ArrayList<>();
 
     protected List<Certificate> _signers;
 
@@ -1759,4 +1914,7 @@ public class Application
     protected FileChannel _lockChannel;
 
     protected static final String[] SA_PROTO = ArrayUtil.EMPTY_STRING;
+
+    protected static final String ENV_VAR_PREFIX = "%ENV.";
+    protected static final Pattern ENV_VAR_PATTERN = Pattern.compile("%ENV\\.(.*?)%");
 }

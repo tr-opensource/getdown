@@ -1,7 +1,7 @@
 //
 // Getdown - application installer, patcher and launcher
-// Copyright (C) 2004-2014 Three Rings Design, Inc.
-// https://raw.github.com/threerings/getdown/master/LICENSE
+// Copyright (C) 2004-2016 Getdown authors
+// https://github.com/threerings/getdown/blob/master/LICENSE
 
 package com.threerings.getdown.launcher;
 
@@ -38,16 +38,7 @@ import java.net.URLConnection;
 
 import java.security.cert.Certificate;
 
-import java.util.ArrayList;
-import java.util.HashSet;
-import java.util.Iterator;
-import java.util.List;
-import java.util.Locale;
-import java.util.Map;
-import java.util.ResourceBundle;
-import java.util.Set;
-import java.util.Timer;
-import java.util.TimerTask;
+import java.util.*;
 
 import ca.beq.util.win32.registry.RegistryKey;
 import ca.beq.util.win32.registry.RegistryValue;
@@ -67,8 +58,9 @@ import com.threerings.getdown.net.HTTPDownloader;
 import com.threerings.getdown.tools.Patcher;
 import com.threerings.getdown.util.ConfigUtil;
 import com.threerings.getdown.util.ConnectionUtil;
+import com.threerings.getdown.util.FileUtil;
 import com.threerings.getdown.util.LaunchUtil;
-import com.threerings.getdown.util.MetaProgressObserver;
+import com.threerings.getdown.util.ProgressAggregator;
 import com.threerings.getdown.util.ProgressObserver;
 import com.threerings.getdown.util.VersionUtil;
 
@@ -126,6 +118,37 @@ public abstract class Getdown extends Thread
     }
 
     /**
+     * Returns true if there are pending new resources, waiting to be installed.
+     */
+    public boolean isUpdateAvailable ()
+    {
+        return _readyToInstall && !_toInstallResources.isEmpty();
+    }
+
+    /**
+     * Installs the currently pending new resources.
+     */
+    public void install () throws IOException, InterruptedException
+    {
+        if (SysProps.noInstall()) {
+            log.info("Skipping install due to 'no_install' sysprop.");
+        } else if (_readyToInstall) {
+            log.info("Installing " + _toInstallResources.size() + " downloaded resources:");
+            for (Resource resource : _toInstallResources) {
+                resource.install();
+                if (Thread.interrupted()) {
+                    throw new InterruptedException("m.applet_stopped");
+                }
+            }
+            _toInstallResources.clear();
+            _readyToInstall = false;
+            log.info("Install completed.");
+        } else {
+            log.info("Nothing to install.");
+        }
+    }
+
+    /**
      * This is used by the applet which always needs a user interface and wants to load it as soon
      * as possible.
      */
@@ -133,10 +156,10 @@ public abstract class Getdown extends Thread
     {
         try {
             _ifc = _app.init(true);
-            createInterface(true);
+            createInterfaceAsync(true);
         } catch (Exception e) {
             log.warning("Failed to preinit: " + e);
-            createInterface(true);
+            createInterfaceAsync(true);
         }
     }
 
@@ -281,7 +304,8 @@ public abstract class Getdown extends Thread
         File pfile = _app.getLocalPath("proxy.txt");
         if (pfile.exists()) {
             try {
-                Map<String, Object> pconf = ConfigUtil.parseConfig(pfile, false);
+                Map<String, Object> pconf =
+                    ConfigUtil.parseConfig(pfile, ConfigUtil.createOpts(false));
                 setProxyProperties((String)pconf.get("host"), (String)pconf.get("port"));
                 return true;
             } catch (IOException ioe) {
@@ -301,8 +325,8 @@ public abstract class Getdown extends Thread
 
         URL rurl = _app.getConfigResource().getRemote();
         try {
-            // try to make a HEAD request for this URL
-            URLConnection conn = ConnectionUtil.open(rurl);
+            // try to make a HEAD request for this URL (use short connect and read timeouts)
+            URLConnection conn = ConnectionUtil.open(rurl, 5, 5);
             if (conn instanceof HttpURLConnection) {
                 HttpURLConnection hcon = (HttpURLConnection)conn;
                 try {
@@ -344,8 +368,10 @@ public abstract class Getdown extends Thread
     {
         if (!StringUtil.isBlank(host)) {
             System.setProperty("http.proxyHost", host);
+            System.setProperty("https.proxyHost", host);
             if (!StringUtil.isBlank(port)) {
                 System.setProperty("http.proxyPort", port);
+                System.setProperty("https.proxyPort", port);
             }
             log.info("Using proxy", "host", host, "port", port);
         }
@@ -371,7 +397,7 @@ public abstract class Getdown extends Thread
                 // and re-initalize
                 _ifc = _app.init(true);
                 // now force our UI to be recreated with the updated info
-                createInterface(true);
+                createInterfaceAsync(true);
             }
             if (!_app.lockForUpdates()) {
                 throw new MultipleGetdownRunning();
@@ -405,7 +431,10 @@ public abstract class Getdown extends Thread
             int[] alreadyValid = new int[1];
 
             // we'll keep track of all the resources we unpack
-            Set<Resource> unpacked = new HashSet<Resource>();
+            Set<Resource> unpacked = new HashSet<>();
+
+            _toInstallResources = new HashSet<>();
+            _readyToInstall = false;
 
             //setStep(Step.START);
             for (int ii = 0; ii < MAX_LOOPS; ii++) {
@@ -427,7 +456,7 @@ public abstract class Getdown extends Thread
 
                 // make sure we have the desired version and that the metadata files are valid...
                 setStep(Step.VERIFY_METADATA);
-                setStatus("m.validating", -1, -1L, false);
+                setStatusAsync("m.validating", -1, -1L, false);
                 if (_app.verifyMetadata(this)) {
                     log.info("Application requires update.");
                     update();
@@ -437,70 +466,83 @@ public abstract class Getdown extends Thread
 
                 // now verify our resources...
                 setStep(Step.VERIFY_RESOURCES);
-                setStatus("m.validating", -1, -1L, false);
-                List<Resource> failures = _app.verifyResources(_progobs, alreadyValid, unpacked);
-                if (failures == null) {
-                    log.info("Resources verified.");
+                setStatusAsync("m.validating", -1, -1L, false);
+                Set<Resource> toDownload = new HashSet<>();
+                _app.verifyResources(_progobs, alreadyValid, unpacked,
+                                     _toInstallResources, toDownload);
 
-                    // if we were downloaded in full from another service (say, Steam), we may
-                    // not have unpacked all of our resources yet
-                    if (Boolean.getBoolean("check_unpacked")) {
-                        File ufile = _app.getLocalPath("unpacked.dat");
-                        long version = -1;
-                        long aversion = _app.getVersion();
-                        if (!ufile.exists()) {
-                            ufile.createNewFile();
-                        } else {
-                            version = VersionUtil.readVersion(ufile);
-                        }
-
-                        if (version < aversion) {
-                            log.info("Performing unpack.",
-                                    "version", version, "aversion", aversion);
-                            setStep(Step.UNPACK);
-                            updateStatus("m.validating");
-                            _app.unpackResources(_progobs, unpacked);
-                            try {
-                                VersionUtil.writeVersion(ufile, aversion);
-                            } catch (IOException ioe) {
-                                log.warning("Failed to update unpacked version", ioe);
-                            }
+                if (toDownload.size() > 0) {
+                    // we have resources to download, also note them as to-be-installed
+                    for (Resource r : toDownload) {
+                        if (!_toInstallResources.contains(r)) {
+                            _toInstallResources.add(r);
                         }
                     }
 
-                    // Only launch if we aren't in silent mode. Some mystery program starting out
-                    // of the blue would be disconcerting.
-                    if (!_silent || _launchInSilent) {
-                        if (Thread.interrupted()) {
-                            // One last interrupted check so we don't launch as the applet aborts
-                            throw new InterruptedException("m.applet_stopped");
-                        }
-                        // And another final check for the lock. It'll already be held unless
-                        // we're in silent mode.
-                        _app.lockForUpdates();
-                        launch();
+                    try {
+                        // if any of our resources have already been marked valid this is not a
+                        // first time install and we don't want to enable tracking
+                        _enableTracking = (alreadyValid[0] == 0);
+                        reportTrackingEvent("app_start", -1);
+
+                        // redownload any that are corrupt or invalid...
+                        log.info(toDownload.size() + " of " + _app.getAllActiveResources().size() +
+                                 " rsrcs require update (" + alreadyValid[0] + " assumed valid).");
+                        setStep(Step.REDOWNLOAD_RESOURCES);
+                        download(toDownload);
+
+                        reportTrackingEvent("app_complete", -1);
+
+                    } finally {
+                        _enableTracking = false;
                     }
-                    return;
+
+                    // now we'll loop back and try it all again
+                    continue;
                 }
 
-                try {
-                    // if any of our resources have already been marked valid this is not a first
-                    // time install and we don't want to enable tracking
-                    _enableTracking = (alreadyValid[0] == 0);
-                    reportTrackingEvent("app_start", -1);
+                // if we were downloaded in full from another service (say, Steam), we may
+                // not have unpacked all of our resources yet
+                if (Boolean.getBoolean("check_unpacked")) {
+                    File ufile = _app.getLocalPath("unpacked.dat");
+                    long version = -1;
+                    long aversion = _app.getVersion();
+                    if (!ufile.exists()) {
+                        ufile.createNewFile();
+                    } else {
+                        version = VersionUtil.readVersion(ufile);
+                    }
 
-                    // redownload any that are corrupt or invalid...
-                    log.info(failures.size() + " of " + _app.getAllActiveResources().size() +
-                             " rsrcs require update (" + alreadyValid[0] + " assumed valid).");
-                    setStep(Step.REDOWNLOAD_RESOURCES);
-                    download(failures);
-
-                    reportTrackingEvent("app_complete", -1);
-                } finally {
-                    _enableTracking = false;
+                    if (version < aversion) {
+                        log.info("Performing unpack", "version", version, "aversion", aversion);
+                        setStep(Step.UNPACK);
+                        updateStatus("m.validating");
+                        _app.unpackResources(_progobs, unpacked);
+                        try {
+                            VersionUtil.writeVersion(ufile, aversion);
+                        } catch (IOException ioe) {
+                            log.warning("Failed to update unpacked version", ioe);
+                        }
+                    }
                 }
 
-                // now we'll loop back and try it all again
+                // assuming we're not doing anything funny, install the update
+                _readyToInstall = true;
+                install();
+
+                // Only launch if we aren't in silent mode. Some mystery program starting out
+                // of the blue would be disconcerting.
+                if (!_silent || _launchInSilent) {
+                    if (Thread.interrupted()) {
+                        // One last interrupted check so we don't launch as the applet aborts
+                        throw new InterruptedException("m.applet_stopped");
+                    }
+                    // And another final check for the lock. It'll already be held unless
+                    // we're in silent mode.
+                    _app.lockForUpdates();
+                    launch();
+                }
+                return;
             }
 
             log.warning("Pants! We couldn't get the job done.");
@@ -531,7 +573,7 @@ public abstract class Getdown extends Thread
     // documentation inherited from interface
     public void updateStatus (String message)
     {
-        setStatus(message, -1, -1L, true);
+        setStatusAsync(message, -1, -1L, true);
     }
 
     /**
@@ -580,33 +622,20 @@ public abstract class Getdown extends Thread
         reportTrackingEvent("jvm_start", -1);
 
         updateStatus("m.downloading_java");
-        List<Resource> list = new ArrayList<Resource>();
+        List<Resource> list = new ArrayList<>();
         list.add(vmjar);
         download(list);
 
         reportTrackingEvent("jvm_unpack", -1);
 
         updateStatus("m.unpacking_java");
-        if (!vmjar.unpack()) {
-            throw new IOException("m.java_unpack_failed");
-        }
-        vmjar.markAsValid();
+        vmjar.install();
 
-        // Sun, why dost thou spite me? Java doesn't know anything about file permissions (and by
-        // extension then, neither does Jar), so on Joonix we have to hackily make java_vm/bin/java
-        // executable by execing chmod; a pox on their children!
-        if (!RunAnywhere.isWindows()) {
-            String vmbin = LaunchUtil.LOCAL_JAVA_DIR + File.separator + "bin" +
-                File.separator + "java";
-            String cmd = "chmod a+rx " + _app.getLocalPath(vmbin);
-            try {
-                log.info("Please smack a Java engineer. Running: " + cmd);
-                Runtime.getRuntime().exec(cmd);
-            } catch (Exception e) {
-                log.warning("Failed to mark VM binary as executable", "cmd", cmd, "error", e);
-                // we should do something like tell the user or something but fucking fuck
-            }
-        }
+        // these only run on non-Windows platforms, so we use Unix file separators
+        String localJavaDir = LaunchUtil.LOCAL_JAVA_DIR + "/";
+        makeExecutable(localJavaDir + "bin/java");
+        makeExecutable(localJavaDir + "lib/jspawnhelper");
+        makeExecutable(localJavaDir + "lib/amd64/jspawnhelper");
 
         // lastly regenerate the .jsa dump file that helps Java to start up faster
         String vmpath = LaunchUtil.getJVMPath(_app.getLocalPath(""));
@@ -614,10 +643,27 @@ public abstract class Getdown extends Thread
             log.info("Regenerating classes.jsa for " + vmpath + "...");
             Runtime.getRuntime().exec(vmpath + " -Xshare:dump");
         } catch (Exception e) {
-            log.warning("Failed to regenerate .jsa dum file", "error", e);
+            log.warning("Failed to regenerate .jsa dump file", "error", e);
         }
 
         reportTrackingEvent("jvm_complete", -1);
+    }
+
+    protected void makeExecutable (String path) {
+        // Java doesn't know anything about file permissions (and by extension then,
+        // neither does Jar), so on Unix we have to hackily do so via chmod
+        if (!RunAnywhere.isWindows()) {
+            File target = _app.getLocalPath(path);
+            String cmd = "chmod a+rx " + target;
+            try {
+                if (target.exists()) {
+                    log.info("Running: " + cmd);
+                    Runtime.getRuntime().exec(cmd);
+                }
+            } catch (Exception e) {
+                log.warning("Failed to mark VM binary as executable", "cmd", cmd, "error", e);
+            }
+        }
     }
 
     /**
@@ -632,7 +678,7 @@ public abstract class Getdown extends Thread
         // attempt to download the patch files
         Resource patch = _app.getPatchResource(null);
         if (patch != null) {
-            List<Resource> list = new ArrayList<Resource>();
+            List<Resource> list = new ArrayList<>();
             list.add(patch);
 
             // add the auxiliary group patch files for activated groups
@@ -647,7 +693,7 @@ public abstract class Getdown extends Thread
 
             // show the patch notes button, if applicable
             if (!StringUtil.isBlank(_ifc.patchNotesUrl)) {
-                createInterface(false);
+                createInterfaceAsync(false);
                 EventQueue.invokeLater(new Runnable() {
                     public void run () {
                         _patchNotes.setVisible(true);
@@ -663,13 +709,14 @@ public abstract class Getdown extends Thread
             setStep(Step.PATCH);
             updateStatus("m.patching");
 
-            // create a new ProgressObserver that divides the different patching phases
-            MetaProgressObserver mprog = new MetaProgressObserver(_progobs, list.size());
-            for (Resource prsrc : list) {
-                mprog.startElement(1);
+            long[] sizes = new long[list.size()];
+            Arrays.fill(sizes, 1L);
+            ProgressAggregator pragg = new ProgressAggregator(_progobs, sizes);
+            int ii = 0; for (Resource prsrc : list) {
+                ProgressObserver pobs = pragg.startElement(ii++);
                 try {
                     Patcher patcher = new Patcher();
-                    patcher.patch(prsrc.getLocal().getParentFile(), prsrc.getLocal(), mprog);
+                    patcher.patch(prsrc.getLocal().getParentFile(), prsrc.getLocal(), pobs);
                 } catch (Exception e) {
                     log.warning("Failed to apply patch", "prsrc", prsrc, e);
                 }
@@ -695,11 +742,11 @@ public abstract class Getdown extends Thread
     /**
      * Called if the application is determined to require resource downloads.
      */
-    protected void download (List<Resource> resources)
+    protected void download (Collection<Resource> resources)
         throws IOException, InterruptedException
     {
         // create our user interface
-        createInterface(false);
+        createInterfaceAsync(false);
 
         // create a downloader to download our resources
         Downloader.Observer obs = new Downloader.Observer() {
@@ -724,7 +771,7 @@ public abstract class Getdown extends Thread
                     // to check if this was the reason for aborting.
                     return false;
                 }
-                setStatus("m.downloading", stepToGlobalPercent(percent), remaining, true);
+                setStatusAsync("m.downloading", stepToGlobalPercent(percent), remaining, true);
                 if (percent > 0) {
                     reportTrackingEvent("progress", percent);
                 }
@@ -757,7 +804,7 @@ public abstract class Getdown extends Thread
     protected void launch ()
     {
         setStep(Step.LAUNCH);
-        setStatus("m.launching", stepToGlobalPercent(100), -1L, false);
+        setStatusAsync("m.launching", stepToGlobalPercent(100), -1L, false);
 
         try {
             if (invokeDirect()) {
@@ -832,8 +879,9 @@ public abstract class Getdown extends Thread
             }
 
             // pump the percent up to 100%
-            setStatus(null, 100, -1L, false);
+            setStatusAsync(null, 100, -1L, false);
             exit(0);
+
             if (_playAgain != null && _playAgain.isEnabled()) {
                 // wait a little time before showing the button
                 Timer timer = new Timer("playAgain", true);
@@ -852,11 +900,11 @@ public abstract class Getdown extends Thread
 
     /**
      * Creates our user interface, which we avoid doing unless we actually have to update
-     * something.
+     * something. NOTE: this happens on the next UI tick, not immediately.
      *
      * @param reinit - if the interface should be reinitialized if it already exists.
      */
-    protected void createInterface (final boolean reinit)
+    protected void createInterfaceAsync (final boolean reinit)
     {
         if (_silent || (_container != null && !reinit)) {
             return;
@@ -1001,7 +1049,7 @@ public abstract class Getdown extends Thread
     protected void fail (String message)
     {
         _dead = true;
-        setStatus(message, stepToGlobalPercent(0), -1L, true);
+        setStatusAsync(message, stepToGlobalPercent(0), -1L, true);
     }
 
     /**
@@ -1038,13 +1086,13 @@ public abstract class Getdown extends Thread
     }
 
     /**
-     * Update the status.
+     * Updates the status. NOTE: this happens on the next UI tick, not immediately.
      */
-    protected void setStatus (
-        final String message, final int percent, final long remaining, boolean createUI)
+    protected void setStatusAsync (final String message, final int percent, final long remaining,
+                                   boolean createUI)
     {
         if (_status == null && createUI) {
-            createInterface(false);
+            createInterfaceAsync(false);
         }
 
         EventQueue.invokeLater(new Runnable() {
@@ -1163,7 +1211,7 @@ public abstract class Getdown extends Thread
         @Override
         public void run () {
             try {
-                HttpURLConnection ucon = ConnectionUtil.openHttp(_url);
+                HttpURLConnection ucon = ConnectionUtil.openHttp(_url, 0, 0);
 
                 // if we have a tracking cookie configured, configure the request with it
                 if (_app.getTrackingCookieName() != null &&
@@ -1196,7 +1244,7 @@ public abstract class Getdown extends Thread
     /** Used to pass progress on to our user interface. */
     protected ProgressObserver _progobs = new ProgressObserver() {
         public void progress (int percent) {
-            setStatus(null, stepToGlobalPercent(percent), -1L, false);
+            setStatusAsync(null, stepToGlobalPercent(percent), -1L, false);
         }
     };
 
@@ -1216,6 +1264,9 @@ public abstract class Getdown extends Thread
     protected boolean _silent;
     protected boolean _launchInSilent;
     protected long _startup;
+
+    protected Set<Resource> _toInstallResources;
+    protected boolean _readyToInstall;
 
     protected boolean _enableTracking = true;
     protected int _reportedProgress = 0;

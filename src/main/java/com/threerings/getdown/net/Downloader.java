@@ -1,15 +1,15 @@
 //
 // Getdown - application installer, patcher and launcher
-// Copyright (C) 2004-2014 Three Rings Design, Inc.
-// https://raw.github.com/threerings/getdown/master/LICENSE
+// Copyright (C) 2004-2016 Getdown authors
+// https://github.com/threerings/getdown/blob/master/LICENSE
 
 package com.threerings.getdown.net;
 
 import java.io.File;
 import java.io.IOException;
 
+import java.util.Collection;
 import java.util.HashMap;
-import java.util.List;
 import java.util.Map;
 
 import com.threerings.getdown.data.Resource;
@@ -64,7 +64,7 @@ public abstract class Downloader extends Thread
      * the specified observer. The {@link #download} method must be called on the downloader to
      * initiate the download process.
      */
-    public Downloader (List<Resource> resources, Observer obs)
+    public Downloader (Collection<Resource> resources, Observer obs)
     {
         super("Downloader");
         _resources = resources;
@@ -113,10 +113,8 @@ public abstract class Downloader extends Thread
 
             // finally report our download completion if we did not already do so when downloading
             // our final resource
-            if (_obs != null && !_complete) {
-                if (!_obs.downloadProgress(100, 0)) {
-                    return false;
-                }
+            if (_obs != null && !_complete && !_obs.downloadProgress(100, 0)) {
+                return false;
             }
 
         } catch (DownloadAbortedException e) {
@@ -154,11 +152,9 @@ public abstract class Downloader extends Thread
     {
         // make sure the resource's target directory exists
         File parent = new File(rsrc.getLocal().getParent());
-        if (!parent.exists()) {
-            if (!parent.mkdirs()) {
-                log.warning("Failed to create target directory for resource '" + rsrc + "'. " +
-                            "Download will certainly fail.");
-            }
+        if (!parent.exists() && !parent.mkdirs()) {
+            log.warning("Failed to create target directory for resource '" + rsrc + "'. " +
+                    "Download will certainly fail.");
         }
         doDownload(rsrc);
     }
@@ -213,7 +209,7 @@ public abstract class Downloader extends Thread
                     throw new DownloadAbortedException();
                 }
             }
-        }   
+        }
     }
 
     /**
@@ -234,14 +230,14 @@ public abstract class Downloader extends Thread
      */
     protected abstract void doDownload (Resource rsrc) throws IOException;
 
-    /** The list of resources to be downloaded. */
-    protected List<Resource> _resources;
+    /** The resources to be downloaded. */
+    protected Collection<Resource> _resources;
 
     /** The reported sizes of our resources. */
-    protected Map<Resource, Long> _sizes = new HashMap<Resource, Long>();
+    protected Map<Resource, Long> _sizes = new HashMap<>();
 
     /** The bytes downloaded for each resource. */
-    protected Map<Resource, Long> _downloaded = new HashMap<Resource, Long>();
+    protected Map<Resource, Long> _downloaded = new HashMap<>();
 
     /** The observer with whom we are communicating. */
     protected Observer _obs;
